@@ -322,6 +322,9 @@ class ChatbotController extends Controller
             'fasilitas' => 'benefit', 'keuntungan' => 'benefit', 'manfaat' => 'benefit',
             'dana penuh' => 'fully funded', 'beasiswa penuh' => 'fully funded', 'pendanaan penuh' => 'fully funded',
             'fully fund' => 'fully funded', 'full funded' => 'fully funded', 'full fund' => 'fully funded',
+            'gratis full' => 'fully funded', 'gratis penuh' => 'fully funded', 'full gratis' => 'fully funded',
+            'beasiswa gratis' => 'fully funded', 'gratis total' => 'fully funded', 'biaya gratis' => 'fully funded',
+            'cover semua' => 'fully funded', 'semua biaya' => 'fully funded', 'full cover' => 'fully funded',
             'lnjutin' => 'yang lain', 'lnjut' => 'yang lain', 'lanjutin' => 'yang lain', 'terusin' => 'yang lain', 'lanjut' => 'yang lain',
             'dana sebagian' => 'partially funded', 'partial funded' => 'partially funded', 'pendanaan sebagian' => 'partially funded',
             'arab saudi' => 'arab saudi',
@@ -605,6 +608,10 @@ private function finalizeResponse($answer, $normalizedData = null, $success = tr
                 if ($kw === 'kuliah' && preg_match('/\bmata\s+kuliah\b/i', $message) && !str_contains($message, 'beasiswa')) {
                     continue;
                 }
+                // Pengecualian: 'bantuan kuliah', 'biaya kuliah', 'cover kuliah' tanpa kata beasiswa = OOT
+                if ($kw === 'kuliah' && preg_match('/\b(bantuan|biaya|cover|ukt|spp|cicilan)\b/i', $message) && !preg_match('/\bbeasiswa\b/i', $message)) {
+                    continue;
+                }
                 $hasStrongKeyword = true;
                 break;
             }
@@ -668,6 +675,17 @@ private function finalizeResponse($answer, $normalizedData = null, $success = tr
             return false; 
         }
 
+        // BLOKIR AWAL: Frasa yang pasti OOT meskipun ada kata 'kuliah'
+        $earlyOotPhrases = [
+            'bantuan kuliah', 'ada bantuan', 'bantuan biaya', 'cover ukt', 'ukt doang',
+            'spp doang', 'biaya kuliah doang', 'cicilan kuliah', 'kos-kosan', 'biaya kos',
+        ];
+        foreach ($earlyOotPhrases as $phrase) {
+            if (str_contains($message, $phrase) && !preg_match('/\bbeasiswa\b/i', $message)) {
+                return true;
+            }
+        }
+
         // 1. Kata kunci utama yang WAJIB ada salah satunya agar dianggap relevan
         $scholarshipKeywords = [
             'beasiswa', 'scholarship', 'apply', 'daftar', 'pendaftaran',
@@ -695,8 +713,19 @@ private function finalizeResponse($answer, $normalizedData = null, $success = tr
                 if (preg_match('/\bmata\s+kuliah\b/i', $message) || preg_match('/\b(belajar|materi|tugas)\b/i', $message)) {
                     return true; // Dianggap OOT
                 }
+                // "bantuan kuliah", "biaya kuliah" tanpa kata beasiswa = OOT
+                if (preg_match('/\b(bantuan|biaya|cover|ukt|spp|kos|pondok)\b/i', $message) && 
+                    !preg_match('/\bbeasiswa\b/i', $message)) {
+                    return true;
+                }
                 $hasScholarshipContext = true;
             }
+        }
+
+        // Blokir "UKT", "SPP", "bantuan kuliah" tanpa konteks beasiswa
+        if (preg_match('/\b(ukt|spp|biaya kuliah|bantuan kuliah|cover ukt|cicilan)\b/i', $message) &&
+            !preg_match('/\bbeasiswa\b/i', $message)) {
+            return true;
         }
 
         // 2. Jika ada kata kunci beasiswa, anggap masuk topik
@@ -1311,6 +1340,8 @@ private function finalizeResponse($answer, $normalizedData = null, $success = tr
             $c['funding'] = 'Fully Funded';
         } elseif (str_contains($text, 'partially funded')) {
             $c['funding'] = 'Partially Funded';
+        } elseif (preg_match('/\b(gratis|free|tanpa\s+biaya|biaya\s+gratis|full\s+gratis|gratis\s+full|gratis\s+penuh|gratis\s+total|cover\s+semua|semua\s+biaya|full\s+cover)\b/i', $text)) {
+            $c['funding'] = 'Fully Funded';
         }
 
         // Filter tambahan edge case
