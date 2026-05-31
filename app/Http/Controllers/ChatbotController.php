@@ -111,11 +111,13 @@ class ChatbotController extends Controller
                     $name = $s['nama_beasiswa'] ?? 'Beasiswa ini';
                     $urlAsli = $s['url_asli'] ?? null;
                     $urlSchoters = $s['url'] ?? null;
-                    $urlInternal = route('scholarship.detail', ['id' => $s['id']]);
-                    $ans = "Berikut link untuk **$name**:\n\n";
-                    if ($urlAsli) $ans .= "🌐 [**Website Resmi**]($urlAsli)\n\n";
-                    if ($urlSchoters) $ans .= "📋 [**Info di Schoters**]($urlSchoters)\n\n";
-                    $ans .= "👉 [**Halaman Detail**]($urlInternal)";
+                    if ($urlAsli) {
+                        $ans = "Berikut link resmi untuk **$name**:\n\n🌐 $urlAsli";
+                    } elseif ($urlSchoters) {
+                        $ans = "Berikut link info untuk **$name**:\n\n📋 $urlSchoters";
+                    } else {
+                        $ans = "Maaf, link untuk **$name** tidak tersedia di dataset. 😊";
+                    }
                     return $this->finalizeResponse($ans, $normalizedData);
                 }
             }
@@ -138,11 +140,13 @@ class ChatbotController extends Controller
                     $name = $s['nama_beasiswa'] ?? 'Beasiswa ini';
                     $urlAsli = $s['url_asli'] ?? null;
                     $urlSchoters = $s['url'] ?? null;
-                    $urlInternal = route('scholarship.detail', ['id' => $s['id']]);
-                    $ans = "Berikut link untuk **$name**:\n\n";
-                    if ($urlAsli) $ans .= "🌐 [**Website Resmi**]($urlAsli)\n\n";
-                    if ($urlSchoters) $ans .= "📋 [**Info di Schoters**]($urlSchoters)\n\n";
-                    $ans .= "👉 [**Halaman Detail**]($urlInternal)";
+                    if ($urlAsli) {
+                        $ans = "Berikut link resmi untuk **$name**:\n\n🌐 $urlAsli";
+                    } elseif ($urlSchoters) {
+                        $ans = "Berikut link info untuk **$name**:\n\n📋 $urlSchoters";
+                    } else {
+                        $ans = "Maaf, link untuk **$name** tidak tersedia di dataset. 😊";
+                    }
                     return $this->finalizeResponse($ans, $normalizedData);
                 }
             }
@@ -612,6 +616,10 @@ private function finalizeResponse($answer, $normalizedData = null, $success = tr
                 if ($kw === 'kuliah' && preg_match('/\b(bantuan|biaya|cover|ukt|spp|cicilan)\b/i', $message) && !preg_match('/\bbeasiswa\b/i', $message)) {
                     continue;
                 }
+                // Pengecualian: 'daftar' dalam konteks "masih bisa daftar", "semester akhir" tanpa kata beasiswa = OOT
+                if ($kw === 'daftar' && preg_match('/\b(semester|masih bisa|masih bisa daftar|aku semester|saya semester)\b/i', $message) && !preg_match('/\bbeasiswa\b/i', $message)) {
+                    continue;
+                }
                 $hasStrongKeyword = true;
                 break;
             }
@@ -679,6 +687,8 @@ private function finalizeResponse($answer, $normalizedData = null, $success = tr
         $earlyOotPhrases = [
             'bantuan kuliah', 'ada bantuan', 'bantuan biaya', 'cover ukt', 'ukt doang',
             'spp doang', 'biaya kuliah doang', 'cicilan kuliah', 'kos-kosan', 'biaya kos',
+            'semester akhir', 'semester berapa', 'semester ini', 'masih bisa daftar',
+            'syarat ipk', 'ipk berapa', 'gpa berapa',
         ];
         foreach ($earlyOotPhrases as $phrase) {
             if (str_contains($message, $phrase) && !preg_match('/\bbeasiswa\b/i', $message)) {
@@ -834,6 +844,10 @@ private function finalizeResponse($answer, $normalizedData = null, $success = tr
         }
         // "cara daftar" atau "pendaftaran" tanpa konteks pencarian
         if (!$isSearchPhrase && !$hasFilter && (str_contains($m, 'daftar') || str_contains($m, 'pendaftaran'))) {
+            // Pengecualian: "masih bisa daftar", "semester akhir masih bisa daftar" = OOT bukan detail intent
+            if (preg_match('/\b(masih bisa|semester|aku masih|saya masih|apakah masih|bisa ngga|bisa gak)\b/i', $m) && !str_contains($m, 'beasiswa')) {
+                return null;
+            }
             return 'apply';
         }
         if (str_contains($m, 'benefit') || str_contains($m, 'cakupan') || str_contains($m, 'manfaat')) return 'benefit';
@@ -879,13 +893,16 @@ private function finalizeResponse($answer, $normalizedData = null, $success = tr
                 $ans = "Kategori Pendanaan **$name**: " . ($selected['kategori'] ?? '-');
                 break;
             case 'apply':
-                $urlInternal = route('scholarship.detail', ['id' => $selected['id']]);
-                $urlSchoters = $selected['url'] ?? null;
                 $urlAsli = $selected['url_asli'] ?? null;
-                $ans = "Untuk mendaftar beasiswa **$name**, berikut link yang bisa kamu akses:\n\n";
-                if ($urlAsli) $ans .= "🌐 [**Website Resmi Beasiswa**]($urlAsli)\n\n";
-                if ($urlSchoters) $ans .= "📋 [**Info Lengkap di Schoters**]($urlSchoters)\n\n";
-                $ans .= "👉 [**Halaman Detail Internal**]($urlInternal)";
+                $urlSchoters = $selected['url'] ?? null;
+                $ans = "Untuk mendaftar beasiswa **$name**, kunjungi link resmi berikut:\n\n";
+                if ($urlAsli) {
+                    $ans .= "🌐 $urlAsli";
+                } elseif ($urlSchoters) {
+                    $ans .= "📋 $urlSchoters";
+                } else {
+                    $ans .= "Maaf, link pendaftaran untuk beasiswa ini tidak tersedia di dataset. 😊";
+                }
                 break;
             case 'detail':
                 $ans = "Berikut ringkasan informasi untuk **$name**:\n\n" .
@@ -943,6 +960,28 @@ private function finalizeResponse($answer, $normalizedData = null, $success = tr
 
     private function handleSearch($rawText, $message, $normalizedData)
     {
+        // Deteksi pertanyaan "kapan dibuka" - info ini tidak ada di dataset
+        if (preg_match('/\b(kapan|tanggal|jadwal)\b.*\b(dibuka|buka|mulai|dimulai|pendaftaran)\b/i', $message) ||
+            preg_match('/\b(dibuka|buka|mulai)\b.*\b(kapan|tanggal|jadwal)\b/i', $message)) {
+            if (!preg_match('/\b(deadline|tutup|ditutup|berakhir)\b/i', $message)) {
+                return $this->finalizeResponse("Mohon maaf, ScholarBot hanya menjawab seputar informasi beasiswa yang tersedia di dataset, termasuk deadline dan persyaratan. Untuk informasi kapan pendaftaran dibuka, silakan matikan Mode RAG di atas atau cek langsung di website resmi beasiswanya ya. 🙏", $normalizedData);
+            }
+        }
+
+        // Deteksi pertanyaan tentang beasiswa spesifik yang tidak ada di dataset
+        $knownButNotInDataset = ['lpdp', 'bidikmisi', 'bpjs', 'beasiswa ppa', 'beasiswa bbm'];
+        foreach ($knownButNotInDataset as $name) {
+            if (str_contains(strtolower($rawText), $name)) {
+                // Cek apakah ada di dataset
+                $found = DB::table('scholarships')
+                    ->whereRaw('LOWER(nama_beasiswa) LIKE ?', ['%' . $name . '%'])
+                    ->exists();
+                if (!$found) {
+                    return $this->finalizeResponse("Mohon maaf, ScholarBot tidak memiliki informasi lengkap mengenai **" . strtoupper($name) . "**. ScholarBot hanya menjawab seputar informasi beasiswa yang tersedia di dataset. Jika ingin mengetahui lebih lanjut, bisa Anda matikan Mode RAG di atas. 🙏", $normalizedData);
+                }
+            }
+        }
+
         $criteria = $this->extractCriteria($message);
         // Merge dengan kriteria dari rawText untuk menangkap kata yang berubah saat normalisasi
         $rawCriteria = $this->extractCriteria(strtolower($rawText));
@@ -969,26 +1008,32 @@ private function finalizeResponse($answer, $normalizedData = null, $success = tr
             $skipLocationWords = [
                 'tahun', 'bulan', 'deadline', 'tutup', 'buka', 'dekat', 'terdekat', 'paling',
                 'masih', 'belum', 'terbaru', 'terbuka', 'segera', 'sarjana', 'magister', 'doktor',
-                'fully', 'funded', 'partial', 'funded', 'khusus', 'gratis', 'penuh', 'sebagian',
+                'fully', 'funded', 'partial', 'partially', 'funded', 'khusus', 'gratis', 'penuh', 'sebagian',
+                'fully funded', 'partially funded', 'fully fund', 'partial fund',
                 '2025', '2026', '2027', '2024', '2028', '2029', '2030',
             ];
-            if (preg_match('/\b(?:di|dari|untuk|negara|kota)\s+([a-z][a-z\s]{2,20})\b/i', $rawText, $lm)) {
-                $candidate = strtolower(trim($lm[1]));
-                $isSkip = false;
-                foreach ($skipLocationWords as $skip) {
-                    if (str_contains($candidate, $skip)) { $isSkip = true; break; }
-                }
-                if (!$isSkip) $locationMatch = $candidate;
-            } elseif (preg_match('/\bbeasiswa\s+([a-z][a-z]{3,20})\b/i', $rawText, $lm)) {
-                // "beasiswa Hogwarts" - kata setelah beasiswa yang bukan keyword umum
-                $skipWords = ['ini', 'itu', 'yang', 'untuk', 'luar', 'dalam', 'negeri', 'tanpa', 'dengan',
-                              'khusus', 'semua', 'bisa', 'ada', 'dari', 'terbaik', 'terbaru', 'populer',
-                              's1', 's2', 's3', 'd3', 'd4', 'fully', 'funded', 'partial',
-                              'tutup', 'buka', 'deadline', 'masih', 'belum', 'dekat', 'paling',
-                              'sarjana', 'magister', 'doktor', 'gratis', 'penuh'];
-                $candidate = strtolower(trim($lm[1]));
-                if (!in_array($candidate, $skipWords)) {
-                    $locationMatch = $candidate;
+            // Jangan jalankan location detection kalau sudah ada funding criteria
+            $hasFundingInText = preg_match('/\b(fully\s+funded|partially\s+funded|fully\s+fund|partial\s+fund|gratis|penuh)\b/i', $rawText);
+            if (!$hasFundingInText) {
+                if (preg_match('/\b(?:di|dari|untuk|negara|kota)\s+([a-z][a-z\s]{2,20})\b/i', $rawText, $lm)) {
+                    $candidate = strtolower(trim($lm[1]));
+                    $isSkip = false;
+                    foreach ($skipLocationWords as $skip) {
+                        if (str_contains($candidate, $skip)) { $isSkip = true; break; }
+                    }
+                    if (!$isSkip) $locationMatch = $candidate;
+                } elseif (preg_match('/\bbeasiswa\s+([a-z][a-z]{3,20})\b/i', $rawText, $lm)) {
+                    $skipWords = ['ini', 'itu', 'yang', 'untuk', 'luar', 'dalam', 'negeri', 'tanpa', 'dengan',
+                                  'khusus', 'semua', 'bisa', 'ada', 'dari', 'terbaik', 'terbaru', 'populer',
+                                  's1', 's2', 's3', 'd3', 'd4', 'fully', 'funded', 'partial', 'partially',
+                                  'tutup', 'buka', 'deadline', 'masih', 'belum', 'dekat', 'paling',
+                                  'sarjana', 'magister', 'doktor', 'gratis', 'penuh',
+                                  'lpdp', 'bidikmisi', 'kip', 'unggulan', 'baznas', 'djarum', 'cimb',
+                                  'afirmasi', 'prestasi', 'bidik', 'misi'];
+                    $candidate = strtolower(trim($lm[1]));
+                    if (!in_array($candidate, $skipWords)) {
+                        $locationMatch = $candidate;
+                    }
                 }
             }
 
@@ -1065,9 +1110,35 @@ private function finalizeResponse($answer, $normalizedData = null, $success = tr
         }
 
         $embedding = $this->generateEmbedding($searchQuery);
-        $rawResults = DB::select("SELECT * FROM hybrid_search(?::text, ?::vector, ?::int)", [
-            $searchQuery, '[' . implode(',', $embedding) . ']', 1000
-        ]);
+
+        // Cache hasil hybrid_search selama 30 menit untuk query yang sama
+        $searchCacheKey = 'search_' . md5(strtolower(trim($searchQuery)));
+        $rawResults = \Illuminate\Support\Facades\Cache::remember($searchCacheKey, 1800, function() use ($searchQuery, $embedding) {
+            $results = DB::select("SELECT * FROM hybrid_search(?::text, ?::vector, ?::int)", [
+                $searchQuery, '[' . implode(',', $embedding) . ']', 1000
+            ]);
+
+            // Enrich dengan kolom yang tidak ada di hybrid_search (url_asli, url, jurusan, sumber)
+            if (!empty($results)) {
+                $ids = array_map(fn($r) => $r->id, $results);
+                $extras = DB::table('scholarships')
+                    ->whereIn('id', $ids)
+                    ->get(['id', 'url_asli', 'url', 'jurusan', 'sumber'])
+                    ->keyBy('id');
+
+                foreach ($results as $r) {
+                    $extra = $extras[$r->id] ?? null;
+                    if ($extra) {
+                        $r->url_asli = $extra->url_asli ?? null;
+                        $r->url      = $extra->url ?? null;
+                        $r->jurusan  = $extra->jurusan ?? null;
+                        $r->sumber   = $extra->sumber ?? null;
+                    }
+                }
+            }
+
+            return $results;
+        });
 
         $filtered = $this->applyStrictFilters($rawResults, $criteria);
 
