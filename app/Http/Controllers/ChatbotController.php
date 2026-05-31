@@ -59,8 +59,16 @@ class ChatbotController extends Controller
                 return $this->finalizeResponse($this->getOutOfTopicResponse(), $normalizedData);
             }
 
+            // 1.3 DEFINISI BEASISWA (Di RAG mode, pertanyaan definisi harus ditolak)
+            if ($ragEnabled && preg_match('/\b(apa itu|pengertian|definisi|jelaskan apa|maksud dari|apakah itu)\b/i', $message)) {
+                return $this->finalizeResponse($this->getOutOfTopicResponse(), $normalizedData);
+            }
+            if ($ragEnabled && preg_match('/\bbeasiswa\s+(itu|adalah|merupakan|ialah)\b/i', $message)) {
+                return $this->finalizeResponse($this->getOutOfTopicResponse(), $normalizedData);
+            }
+
             // 1.5 THANK YOU DETECTION
-            if ($this->isThankYou($message)) {
+            if ($this->isThankYou($message) && !$this->isSearchQuery($message)) {
                 return $this->finalizeResponse($this->getThankYouResponse(), $normalizedData);
             }
 
@@ -78,11 +86,12 @@ class ChatbotController extends Controller
             }
 
             // 1.7.6 VALIDASI PENDANAAN (Konteks Follow-up: Apakah ini fully funded?)
-            // Skip jika pesan mengandung konteks pencarian baru (negara, jenjang, dll)
+            // Skip jika pesan mengandung "apa itu" (definisi) atau konteks pencarian baru
             $isNewSearch = preg_match('/\b(beasiswa|cari|tampilkan|kasih|ada|mau|coba|list|daftar)\b/i', $message) ||
                 preg_match('/\b(s1|s2|s3|d3|d4|luar negeri|dalam negeri|fully funded|partially funded)\b/i', $message) &&
                 !preg_match('/\b(ini|itu|tersebut|apakah|tipe)\b/i', $message);
-            if ($ragEnabled && !$isNewSearch && (session()->has('selected_scholarship') || session()->has('last_search_results'))) {
+            $isDefinisi = preg_match('/\b(apa itu|pengertian|definisi|maksud)\b/i', $message);
+            if ($ragEnabled && !$isNewSearch && !$isDefinisi && (session()->has('selected_scholarship') || session()->has('last_search_results'))) {
                 $fundingRegex = '/\b(beasiswa\s+)?(ini|itu|tersebut|no\s+\d+|nomor\s+\d+|ke\s+\d+)?\s*(apakah|tipe)?\s*(fully\s+funded|full\s+funded|partially\s+funded|partial\s+funded|dana\s+penuh|dana\s+sebagian|biaya\s+penuh|biaya\s+sebagian)\b/i';
                 if (preg_match($fundingRegex, $message, $matches)) {
                     $ref = trim($matches[2] ?? '');
@@ -93,6 +102,31 @@ class ChatbotController extends Controller
 
             // 2. DETAIL & SELECTION LOGIC (Prioritas Tinggi)
             
+            // 4.4.5 LINK TANPA NOMOR ("berikan linknya", "link beasiswanya") - pakai selected_scholarship
+            if (preg_match('/\b(link|url|tautan|linknya|websitenya|situsnya)\b/i', $message) &&
+                !preg_match('/\b(nomor|no|nmr|#)\s*\d+/i', $message) &&
+                session()->has('selected_scholarship')) {
+                $s = session()->get('selected_scholarship');
+                if (is_array($s)) {
+                    $name = $s['nama_beasiswa'] ?? 'Beasiswa ini';
+                    $urlAsli = $s['url_asli'] ?? null;
+                    $urlSchoters = $s['url'] ?? null;
+                    $urlInternal = route('scholarship.detail', ['id' => $s['id']]);
+                    $ans = "Berikut link untuk **$name**:\n\n";
+                    if ($urlAsli) $ans .= "🌐 [**Website Resmi**]($urlAsli)\n\n";
+                    if ($urlSchoters) $ans .= "📋 [**Info di Schoters**]($urlSchoters)\n\n";
+                    $ans .= "👉 [**Halaman Detail**]($urlInternal)";
+                    return $this->finalizeResponse($ans, $normalizedData);
+                }
+            }
+            // Juga handle: "berikan linknya" saat ada last_search tapi belum pilih
+            if (preg_match('/\b(link|url|tautan|linknya)\b/i', $message) &&
+                !preg_match('/\b(nomor|no|nmr|#)\s*\d+/i', $message) &&
+                !session()->has('selected_scholarship') &&
+                session()->has('last_search_results')) {
+                return $this->finalizeResponse("Silakan pilih nomor beasiswa terlebih dahulu untuk mendapatkan linknya. Contoh: **link nomor 1** atau **no 2**. 😊", $normalizedData);
+            }
+
             // 4.4.5 LINK NOMOR X
             if (preg_match('/\b(link|url|tautan)\b.*\b(nomor|no|nmr|#)\s*(\d+)/i', $message, $linkMatch) ||
                 preg_match('/\b(nomor|no|nmr|#)\s*(\d+).*\b(link|url|tautan)\b/i', $message, $linkMatch2)) {
@@ -117,28 +151,32 @@ class ChatbotController extends Controller
 
             // 2.1 Deteksi Pemilihan Nomor (Misal: "pilih no 1" atau "benefit no 2")
             $selectedNumber = null;
-            if (preg_match('/\b(?:nomor|no|pilih|nmr|#)\s*([0-9]+)\b/i', $message, $matches) || 
-                preg_match('/^(?:pilih\s+|nomor\s+|no\s+|nmr\s+|#)?([0-9]+)$/i', trim($message), $matches)) {
-                $selectedNumber = (int)$matches[1];
-            } else if ($detailIntent && preg_match('/\b([0-9]+)\b/', $message, $matches)) {
-                $selectedNumber = (int)$matches[1];
+            // Jangan anggap tahun (2020-2035) sebagai nomor pilihan
+            $hasYear = preg_match('/\b(20[2-3][0-9])\b/', $message);
+            $isExplicitSelect = !$hasYear && (
+                preg_match('/\b(?:nomor|no|pilih|nmr|#)\s*([0-9]+)\b/i', $message, $matches) ||
+                preg_match('/^(?:pilih\s+|nomor\s+|no\s+|nmr\s+|#)?([0-9]+)$/i', trim($message), $matches)
+            );
+            if ($isExplicitSelect) {
+                $num = (int)$matches[1];
+                if ($num >= 1 && $num <= 50) $selectedNumber = $num;
+            } else if (!$hasYear && $detailIntent && preg_match('/\b([0-9]+)\b/', $message, $matches)) {
+                $num = (int)$matches[1];
+                if ($num >= 1 && $num <= 20 && strlen(trim($message)) <= 15) {
+                    $selectedNumber = $num;
+                }
             }
-
             // 2.2 Jika ada intent detail dan sudah ada beasiswa terpilih
             if ($detailIntent && session()->has('selected_scholarship') && !$selectedNumber) {
                 $criteria = $this->extractCriteria($message);
-                $hasNewFilters = !empty($criteria['negara']) || !empty($criteria['benua']) || 
-                                !empty($criteria['jenjang']) || !empty($criteria['bulan']) || 
+                $hasNewFilters = !empty($criteria['negara']) || !empty($criteria['benua']) ||
+                                !empty($criteria['jenjang']) || !empty($criteria['bulan']) ||
                                 !empty($criteria['funding']);
-                
                 // JIKA TIDAK ADA FILTER BARU, BERIKAN DETAIL BEASISWA SAAT INI
                 if (!$hasNewFilters) {
                     return $this->handleDetailRequest($detailIntent, $normalizedData);
                 }
             }
-
-            // 2.2b. Detail intent TANPA beasiswa terpilih — cari nama langsung dari pesan
-            // Contoh: "deadline australia awards", "syarat monbukagakusho"
             if ($detailIntent && !session()->has('selected_scholarship') && !$selectedNumber) {
                 $nameQuery = preg_replace('/\b(deadline|syarat|persyaratan|benefit|manfaat|cara|daftar|apply|info|detail)\b/i', '', $rawMessage);
                 $nameQuery = trim($nameQuery);
@@ -170,10 +208,15 @@ class ChatbotController extends Controller
             // 2.3 Eksekusi Pemilihan Nomor
             if ($selectedNumber) {
                 $allResults = session()->get('last_search_all_results', []);
-                if (isset($allResults[$selectedNumber - 1])) {
-                    session()->put('selected_scholarship', (array)$allResults[$allResults[$selectedNumber - 1]->id ?? ($selectedNumber - 1)]);
-                    // Ambil ulang data session untuk mendapatkan array lengkap
-                    $selected = (array)$allResults[$selectedNumber - 1];
+                $currentPage = session()->get('last_search_page', 1);
+                // Nomor <= 5 relatif ke halaman saat ini; > 5 dianggap nomor global
+                $pageStartIndex = ($currentPage - 1) * 5;
+                $globalIndex = ($selectedNumber <= 5)
+                    ? $pageStartIndex + ($selectedNumber - 1)
+                    : ($selectedNumber - 1);
+
+                if (isset($allResults[$globalIndex])) {
+                    $selected = (array)$allResults[$globalIndex];
                     session()->put('selected_scholarship', $selected);
 
                     // Jika ada intent detail sekaligus (misal "benefit no 1")
@@ -192,6 +235,15 @@ class ChatbotController extends Controller
             }
 
             // 4. PERTANYAAN UMUM (FAQ / Rule-based knowledge)
+            // Di mode RAG, "apa itu X" untuk definisi umum harus ditolak kecuali sangat relevan
+            if ($ragEnabled) {
+                $isDefinitionQuery = preg_match('/\b(apa itu|pengertian|definisi|jelaskan apa|maksud dari)\b/i', $message);
+                $isScholarshipDefinition = preg_match('/\b(beasiswa|ielts|toefl|loa|motivation letter|recommendation letter|fully funded|partially funded)\b/i', $message);
+                // Hanya jawab FAQ kalau sangat spesifik tentang istilah beasiswa, bukan "beasiswa itu apa" atau "apa itu ielts" umum
+                if ($isDefinitionQuery && !preg_match('/\b(perbedaan|beda|compare|vs)\b/i', $message)) {
+                    return $this->finalizeResponse($this->getOutOfTopicResponse(), $normalizedData);
+                }
+            }
             $faqAnswer = $this->handleFAQ($message);
             if ($faqAnswer) {
                 return $this->finalizeResponse($faqAnswer, $normalizedData);
@@ -299,6 +351,9 @@ class ChatbotController extends Controller
             'germany' => 'jerman', 'france' => 'perancis', 'netherlands' => 'belanda', 'switzerland' => 'swiss',
             'spain' => 'spanyol', 'italy' => 'italia', 'egypt' => 'mesir', 'turkey' => 'turki', 'mexico' => 'meksiko',
             'brazil' => 'brasil', 'russia' => 'rusia', 'norway' => 'norwegia', 'sweden' => 'swedia', 'finland' => 'finlandia',
+            'aus' => 'australia', 'oz' => 'australia', 'jp' => 'jepang', 'japan' => 'jepang',
+            'south korea' => 'korea selatan', 'uk' => 'inggris', 'england' => 'inggris', 'canada' => 'kanada',
+            'china' => 'cina', 'tiongkok' => 'cina', 'singapore' => 'singapura',
             'mks' => 'terima kasih', 'makasih' => 'terima kasih', 'thx' => 'terima kasih', 'thanks' => 'terima kasih', 'kalo' => 'kalau', 'kl' => 'kalau',
             'kpn' => 'kapan', 'dmn' => 'dimana', 'spy' => 'supaya', 'utk' => 'untuk', 'mks' => 'makasih',
             'sy' => 'saya', 'km' => 'kamu', 'sm' => 'sama', 'bgt' => 'banget', 'bs' => 'bisa', 'tdk' => 'tidak',
@@ -328,13 +383,15 @@ class ChatbotController extends Controller
             'detail', 'boleh', 'terimakasih', 'makasih', 'negara', 'benua', 'kapan', 'gimana', 'dimana', 'bagaimana', 'cara',
             'jepang', 'korea', 'inggris', 'jerman', 'belanda', 'kanada', 'australia', 'malaysia', 'singapura', 'thailand', 'rusia', 'turki', 'mesir', 'prancis', 'amerika'
         ];
+        // Kata-kata yang TIDAK boleh dikoreksi Levenshtein (kata lokasi penting)
+        $protectedWords = ['dalam', 'negeri', 'luar', 'buka', 'masih', 'belum', 'tutup', 'bulan', 'tahun'];
         $words = explode(' ', $text);
         foreach ($words as &$word) {
+            // Skip kata yang dilindungi
+            if (in_array($word, $protectedWords)) continue;
             // Periksa kata dengan panjang >= 3
             if (strlen($word) >= 3) {
                 foreach ($targetWords as $target) {
-                    // Jika butuh maksimal 2 perubahan huruf (typo wajar) dan kata tidak sama persis
-                    // Jika butuh maksimal 2 perubahan huruf (typo wajar) dan kata tidak sama persis
                     $dist = levenshtein($word, $target);
                     if ($word !== $target && $dist > 0 && $dist <= 2) {
                         // Khusus kata sangat pendek (3 huruf), hanya toleransi 1 kesalahan agar tidak salah koreksi
@@ -474,6 +531,10 @@ private function finalizeResponse($answer, $normalizedData = null, $success = tr
             if ($this->isSearchQuery($message) || strlen($message) > 15) {
                 return false;
             }
+            // Jika ada kata kunci beasiswa/deadline/buka, bukan acknowledgment
+            if (preg_match('/\b(beasiswa|scholarship|buka|dibuka|deadline|bulan|tahun|masih|belum|tutup)\b/i', $message)) {
+                return false;
+            }
             return true;
         }
         return false;
@@ -501,6 +562,24 @@ private function finalizeResponse($answer, $normalizedData = null, $success = tr
 
     private function isSearchQuery($message)
     {
+        // Deteksi khusus: pertanyaan deadline/sorting yang implisit soal beasiswa
+        $deadlineSearchPhrases = [
+            'deadline terdekat', 'deadline paling dekat', 'paling dekat deadline',
+            'masih buka', 'yang masih buka', 'belum tutup', 'masih dibuka',
+            'tutup bulan', 'deadline bulan', 'batas bulan', 'tutup di bulan',
+            'tahun 2026', 'tahun 2027', 'di tahun 2026', 'di tahun 2027',
+            'tahun ini', 'bulan ini', 'bulan depan',
+        ];
+        foreach ($deadlineSearchPhrases as $phrase) {
+            if (str_contains($message, $phrase)) return true;
+        }
+
+        // Blokir query yang jelas tidak relevan dengan beasiswa (level pendidikan tidak sesuai)
+        if (preg_match('/\b(smp|sd|sma|tk|anak smp|anak sd|anak sma)\b/i', $message) && 
+            !preg_match('/\b(beasiswa sma|beasiswa smp)\b/i', $message)) {
+            return false;
+        }
+
         // KEYWORD WAJIB (Must Have) - Salah satu harus ada agar dianggap pencarian beasiswa
         $mustHave = [
             'beasiswa', 'scholarship', 'kuliah', 'studi', 'daftar', 'apply', 'registrasi', 
@@ -582,8 +661,14 @@ private function finalizeResponse($answer, $normalizedData = null, $success = tr
         $scholarshipKeywords = [
             'beasiswa', 'scholarship', 'apply', 'daftar', 'pendaftaran',
             'deadline', 'ielts', 'toefl', 'loa', 's1', 's2', 's3', 'd3', 'd4', 'syarat', 'persyaratan', 
-            'benefit', 'biaya', 'funding', 'pendanaan', 'negara', 'benua', 'akademik', 'edukasi'
+            'benefit', 'biaya', 'funding', 'pendanaan', 'negara', 'benua', 'akademik', 'edukasi',
+            'fully funded', 'partially funded', 'masih buka', 'tutup', 'buka'
         ];
+
+        // Deteksi angka tahun 2026/2027 dalam konteks beasiswa — jangan blokir
+        if (preg_match('/\b(20[2-3][0-9])\b/', $message)) {
+            return false;
+        }
 
         $hasScholarshipContext = false;
         foreach ($scholarshipKeywords as $kw) {
@@ -664,10 +749,10 @@ private function finalizeResponse($answer, $normalizedData = null, $success = tr
         if (str_contains($message, 'perbedaan') && str_contains($message, 'fully funded') && str_contains($message, 'partially funded')) {
             return "Perbedaan utamanya:\n- **Fully Funded** menanggung seluruh biaya (kuliah, hidup, tiket, dll).\n- **Partially Funded** hanya menanggung sebagian biaya (misal hanya biaya kuliah atau uang saku saja).";
         }
-        if (str_contains($message, 'apa itu fully funded') || (str_contains($message, 'fully funded') && str_contains($message, 'apa'))) {
+        if (str_contains($message, 'apa itu fully funded') || (str_contains($message, 'fully funded') && str_contains($message, 'apa itu'))) {
             return "Fully Funded adalah jenis beasiswa yang menanggung seluruh biaya studi, biasanya mencakup biaya kuliah (tuition fee), biaya hidup (living allowance), asuransi kesehatan, hingga tiket pesawat.";
         }
-        if (str_contains($message, 'apa itu partially funded') || (str_contains($message, 'partially funded') && str_contains($message, 'apa'))) {
+        if (str_contains($message, 'apa itu partially funded') || (str_contains($message, 'partially funded') && str_contains($message, 'apa itu'))) {
             return "Partially Funded adalah beasiswa pendanaan sebagian. Beasiswa ini hanya menanggung sebagian biaya, misalnya hanya biaya kuliah saja, atau hanya memberikan uang saku tertentu tanpa menanggung tiket pesawat.";
         }
         if (str_contains($message, 'apa itu ielts')) {
@@ -690,21 +775,36 @@ private function finalizeResponse($answer, $normalizedData = null, $success = tr
     private function getDetailIntent($message)
     {
         $m = strtolower($message);
-        
-        // Prioritas: Cara Daftar / Apply (menggunakan str_contains agar tahan banting)
-        if (str_contains($m, 'daftar') || str_contains($m, 'apply') || str_contains($m, 'registrasi') || 
-            str_contains($m, 'pendaftaran') || str_contains($m, 'gabung') || str_contains($m, 'join')) {
-            return 'apply';
+
+        // Jika pesan mengandung kata pencarian atau filter (negara, jenjang, bulan, funding), ini BUKAN detail intent
+        $isSearchPhrase = preg_match('/\b(beasiswa|cari|tampilkan|berikan|kasih|ada|list|daftar beasiswa|mau cari|mau tanya|info beasiswa)\b/i', $m);
+        $hasFilter = preg_match('/\b(s1|s2|s3|d3|d4|luar negeri|dalam negeri|fully funded|partially funded|bulan|januari|februari|maret|april|mei|juni|juli|agustus|september|oktober|november|desember|jepang|korea|australia|eropa|asia|amerika|inggris|jerman|belanda|kanada|rusia|turki|mesir|prancis|singapura|malaysia|thailand|cina|china)\b/i', $m);
+
+        // Jika ada filter atau kata pencarian, ini pencarian baru — bukan detail intent
+        if ($isSearchPhrase || $hasFilter) {
+            // Pengecualian: "benefit no X" atau "syarat no X" tetap dianggap detail intent + nomor
+            if (!preg_match('/\b(benefit|syarat|persyaratan|deadline|apply|cara daftar)\b/i', $m)) {
+                return null;
+            }
         }
 
+        // Prioritas: Cara Daftar / Apply
+        if (str_contains($m, 'apply') || str_contains($m, 'registrasi') || str_contains($m, 'gabung') || str_contains($m, 'join')) {
+            return 'apply';
+        }
+        // "cara daftar" atau "pendaftaran" tanpa konteks pencarian
+        if (!$isSearchPhrase && !$hasFilter && (str_contains($m, 'daftar') || str_contains($m, 'pendaftaran'))) {
+            return 'apply';
+        }
         if (str_contains($m, 'benefit') || str_contains($m, 'cakupan') || str_contains($m, 'manfaat')) return 'benefit';
         if (str_contains($m, 'syarat') || str_contains($m, 'persyaratan') || str_contains($m, 'kualifikasi')) return 'persyaratan';
-        if (str_contains($m, 'deadline') || str_contains($m, 'batas') || str_contains($m, 'tutup')) return 'deadline';
+        // "deadline" hanya jika bukan query pencarian dengan filter bulan
+        if (!$isSearchPhrase && !$hasFilter && (str_contains($m, 'deadline') || str_contains($m, 'batas') || str_contains($m, 'tutup'))) return 'deadline';
         if (str_contains($m, 'dana') || str_contains($m, 'biaya') || str_contains($m, 'funding')) return 'funding';
-        if (str_contains($m, 'detail') || str_contains($m, 'info') || str_contains($m, 'lengkap')) return 'detail';
-
+        if (!$isSearchPhrase && !$hasFilter && (str_contains($m, 'detail') || str_contains($m, 'info') || str_contains($m, 'lengkap'))) return 'detail';
         return null;
     }
+
 
     private function handleDetailRequest($intent, $normalizedData)
     {
@@ -797,27 +897,102 @@ private function finalizeResponse($answer, $normalizedData = null, $success = tr
     private function handleSearch($rawText, $message, $normalizedData)
     {
         $criteria = $this->extractCriteria($message);
+        // Merge dengan kriteria dari rawText untuk menangkap kata yang berubah saat normalisasi
+        $rawCriteria = $this->extractCriteria(strtolower($rawText));
+        if ($criteria['lokasi_tipe'] === null && $rawCriteria['lokasi_tipe'] !== null) {
+            $criteria['lokasi_tipe'] = $rawCriteria['lokasi_tipe'];
+        }
+        if (empty($criteria['negara']) && !empty($rawCriteria['negara'])) {
+            $criteria['negara'] = $rawCriteria['negara'];
+            $criteria['negara_ori'] = $rawCriteria['negara_ori'];
+        }
+        if (empty($criteria['bulan']) && !empty($rawCriteria['bulan'])) {
+            $criteria['bulan'] = $rawCriteria['bulan'];
+        }
+        // Jika tidak ada kriteria apapun dan tidak ada konteks sebelumnya, minta perjelas
+        $hasAnyCriteria = !empty($criteria['negara']) || !empty($criteria['benua']) || !empty($criteria['jenjang']) ||
+            !empty($criteria['bulan']) || !empty($criteria['funding']) || !empty($criteria['bidang']) || 
+            $criteria['lokasi_tipe'] !== null || !empty($criteria['tahun']) || !empty($criteria['masih_buka']) ||
+            !empty($criteria['sort_deadline']);
 
+        // Deteksi lokasi fiktif/tidak valid: "beasiswa di [kata]" dimana kata bukan negara/tempat di DB
+        // Contoh: "beasiswa di Mars", "beasiswa Hogwarts", "beasiswa di Atlantis"
+        if (!$hasAnyCriteria || empty($criteria['negara'])) {
+            $locationMatch = null;
+            if (preg_match('/\b(?:di|dari|untuk|negara|kota)\s+([a-z][a-z\s]{2,20})\b/i', $rawText, $lm)) {
+                $locationMatch = strtolower(trim($lm[1]));
+            } elseif (preg_match('/\bbeasiswa\s+([a-z][a-z]{3,20})\b/i', $rawText, $lm)) {
+                // "beasiswa Hogwarts" - kata setelah beasiswa yang bukan keyword umum
+                $skipWords = ['ini', 'itu', 'yang', 'untuk', 'luar', 'dalam', 'negeri', 'tanpa', 'dengan', 
+                              'khusus', 'semua', 'bisa', 'ada', 'dari', 'terbaik', 'terbaru', 'populer',
+                              's1', 's2', 's3', 'd3', 'd4', 'fully', 'funded', 'partial'];
+                $candidate = strtolower(trim($lm[1]));
+                if (!in_array($candidate, $skipWords)) {
+                    $locationMatch = $candidate;
+                }
+            }
+
+            if ($locationMatch) {
+                // Cek apakah kata ini ada di DB negara
+                $allCountriesRaw = DB::table('scholarships')->distinct()->whereNotNull('negara')->pluck('negara')->toArray();
+                $allCountriesFlat = [];
+                foreach ($allCountriesRaw as $raw) {
+                    $parts = explode(',', str_replace(['luar negeri (', 'dalam negeri (', ')'], '', strtolower($raw)));
+                    foreach ($parts as $p) {
+                        $allCountriesFlat[] = trim($p);
+                    }
+                }
+                $allCountriesFlat = array_unique(array_filter($allCountriesFlat));
+                // Kata-kata yang valid dan bukan nama tempat (jangan salah deteksi)
+                $validKeywords = ['luar', 'dalam', 'negeri', 'negara', 'internasional', 'local', 'semua', 'jenjang'];
+                $isKnownCountry = in_array($locationMatch, $allCountriesFlat) || in_array($locationMatch, $validKeywords);
+                // Cek juga partial match (misal "jepang" ada di "luar negeri (jepang)")
+                if (!$isKnownCountry) {
+                    foreach ($allCountriesFlat as $c) {
+                        if (str_contains($c, $locationMatch) || str_contains($locationMatch, $c)) {
+                            $isKnownCountry = true;
+                            break;
+                        }
+                    }
+                }
+                if (!$isKnownCountry) {
+                    $displayName = ucwords($locationMatch);
+                    return $this->finalizeResponse("Mohon maaf, ScholarBot tidak memiliki data beasiswa untuk **$displayName**. ScholarBot hanya menyediakan data beasiswa tahun **2026** dan **2027** untuk lokasi yang tersedia. Coba cari negara lain ya! 😊", $normalizedData);
+                }
+            }
+        }
+
+        if (!$hasAnyCriteria && !session()->has('last_search_criteria')) {
+            return $this->finalizeResponse("Silakan sebutkan kriteria beasiswa yang kamu cari, misalnya negara, jenjang (S1/S2/S3), atau jenis pendanaan. Contoh: **Beasiswa S2 di Jepang** atau **Beasiswa Fully Funded luar negeri**. 😊", $normalizedData);
+        }
         // CONTEXT MERGING: Jika kriteria baru minim, gunakan kriteria dari pencarian sebelumnya
         if (session()->has('last_search_criteria')) {
             $lastCriteria = session()->get('last_search_criteria');
-            
-            // JIKA ada JURUSAN baru atau JENJANG baru yang spesifik, RESET negara lama agar tidak "nyangkut"
             $isNewMajor = !empty($criteria['bidang']);
             $isNewLevel = !empty($criteria['jenjang']);
             $isNewCountry = !empty($criteria['negara']) || !empty($criteria['benua']);
-
-            // Cek apakah ini kemungkinan follow-up (pesan sangat pendek)
+            $isNewLokasi = $criteria['lokasi_tipe'] !== null;
             $hasFunding = !empty($criteria['funding']);
-            $isFollowUp = (strlen($message) < 20 || preg_match('/\b(doang|cuma|hanya|berapa|itu|tadi|lagi|aja|saja)\b/i', $message)) && !$hasFunding;
-            
-            if ($isFollowUp && !$isNewMajor && !$isNewLevel && !$isNewCountry) {
-                if (empty($criteria['negara']) && empty($criteria['benua']) && !empty($lastCriteria['negara'])) {
-                    $criteria['negara'] = $lastCriteria['negara'];
-                    $criteria['negara_ori'] = $lastCriteria['negara_ori'];
-                }
-                if (empty($criteria['jenjang']) && !empty($lastCriteria['jenjang'])) {
+
+            // Jika ada kriteria BARU yang eksplisit (negara baru, jurusan baru, lokasi baru) → RESET konteks lama
+            $isNewSearch = $isNewCountry || $isNewMajor || $isNewLokasi || $hasFunding;
+            if ($isNewSearch) {
+                // Pakai kriteria baru saja, jangan merge dengan lama
+                // Tapi tetap inherit jenjang kalau tidak disebutkan ulang dan bukan topik baru total
+                if (!$isNewLevel && !$isNewCountry && !$isNewLokasi && $isNewMajor && !empty($lastCriteria['jenjang'])) {
                     $criteria['jenjang'] = $lastCriteria['jenjang'];
+                }
+            } else {
+                // Follow-up: pesan pendek atau tidak ada filter baru → merge
+                $isFollowUp = strlen($message) < 25 || preg_match('/\b(doang|cuma|hanya|berapa|itu|tadi|lagi|aja|saja)\b/i', $message);
+                if ($isFollowUp && !$isNewLevel) {
+                    if (empty($criteria['negara']) && empty($criteria['benua']) && !empty($lastCriteria['negara'])) {
+                        $criteria['negara'] = $lastCriteria['negara'];
+                        $criteria['negara_ori'] = $lastCriteria['negara_ori'];
+                    }
+                    if (empty($criteria['jenjang']) && !empty($lastCriteria['jenjang'])) {
+                        $criteria['jenjang'] = $lastCriteria['jenjang'];
+                    }
                 }
             }
         }
@@ -837,10 +1012,37 @@ private function finalizeResponse($answer, $normalizedData = null, $success = tr
         $filtered = $this->applyStrictFilters($rawResults, $criteria);
 
         if (empty($filtered)) {
-            if (!empty($criteria['negara'])) {
-                return $this->finalizeResponse("Maaf, saya belum memiliki data beasiswa untuk negara tersebut.", $normalizedData);
+            // Cek apakah ini query tahun yang tidak ada datanya
+            if (!empty($criteria['tahun']) && $criteria['tahun'] !== '2026' && $criteria['tahun'] !== '2027') {
+                return $this->finalizeResponse("Mohon maaf, ScholarBot hanya menyediakan data beasiswa tahun **2026** dan **2027**. Silakan coba cari dengan tahun tersebut ya! 😊", $normalizedData);
             }
-            return $this->finalizeResponse("Maaf, saya tidak menemukan beasiswa yang sesuai dengan pencarian tersebut.", $normalizedData);
+            // Fallback untuk nama beasiswa/tempat yang tidak masuk akal
+            if (!empty($criteria['negara'])) {
+                $negaraList = implode(', ', array_map('ucwords', $criteria['negara']));
+                return $this->finalizeResponse("Mohon maaf, saat ini ScholarBot belum memiliki data beasiswa untuk **$negaraList**. Coba cari beasiswa di negara lain ya! 😊", $normalizedData);
+            }
+            if (!empty($criteria['bulan'])) {
+                $bulanList = implode(', ', array_map('ucfirst', $criteria['bulan']));
+                return $this->finalizeResponse("Mohon maaf, tidak ditemukan beasiswa dengan deadline bulan **$bulanList** sesuai kriteria tersebut. Coba cari dengan kriteria lain ya! 😊", $normalizedData);
+            }
+            return $this->finalizeResponse("Mohon maaf, ScholarBot tidak menemukan beasiswa yang sesuai dengan pencarian tersebut. ScholarBot hanya menyediakan data beasiswa tahun **2026** dan **2027**. Coba ubah kriteria pencarianmu ya! 😊", $normalizedData);
+        }
+
+        // Sort by deadline jika diminta
+        if (!empty($criteria['sort_deadline'])) {
+            usort($filtered, function($a, $b) {
+                $a = (array)$a;
+                $b = (array)$b;
+                $dateA = $a['deadline'] ?? '';
+                $dateB = $b['deadline'] ?? '';
+                try {
+                    $tA = !empty($dateA) && $dateA !== '-' ? \Carbon\Carbon::parse($dateA)->timestamp : PHP_INT_MAX;
+                    $tB = !empty($dateB) && $dateB !== '-' ? \Carbon\Carbon::parse($dateB)->timestamp : PHP_INT_MAX;
+                    return $tA - $tB;
+                } catch (\Exception $e) {
+                    return 0;
+                }
+            });
         }
 
         if (!empty($criteria['benua']) && empty($criteria['negara'])) {
@@ -880,8 +1082,14 @@ private function finalizeResponse($answer, $normalizedData = null, $success = tr
                 $headerParts[] = ($criteria['lokasi_tipe'] === 'luar') ? "khusus di Luar Negeri" : "khusus di Dalam Negeri";
             }
             if (!empty($criteria['funding'])) $headerParts[] = "kategori " . $criteria['funding'];
+            if (!empty($criteria['tahun'])) $headerParts[] = "tahun " . $criteria['tahun'];
+            if (!empty($criteria['bulan'])) $headerParts[] = "deadline bulan " . ucfirst($criteria['bulan'][0]);
 
-            $resp = "Berikut beberapa beasiswa " . implode(' ', $headerParts) . ":\n\n";
+            if (!empty($criteria['sort_deadline'])) {
+                $resp = "Berikut beasiswa dengan **deadline paling dekat**:\n\n";
+            } else {
+                $resp = "Berikut beberapa beasiswa" . (empty($headerParts) ? "" : " " . implode(', ', $headerParts)) . ":\n\n";
+            }
         }
 
         foreach ($limitedResults as $i => $s) {
@@ -1002,10 +1210,19 @@ private function finalizeResponse($answer, $normalizedData = null, $success = tr
 
         // 4. Deteksi Tipe Lokasi (Luar/Dalam Negeri)
         $lowerText = strtolower($text);
-        if (preg_match('/\b(luar negeri|international|abroad|luar)\b/i', $lowerText)) {
+        if (preg_match('/\b(luar\s*negeri|international|abroad|luar\s+negeri)\b/i', $lowerText)) {
             $c['lokasi_tipe'] = 'luar';
-        } elseif (preg_match('/\b(dalam negeri|domestic|local|indonesia|indo)\b/i', $lowerText)) {
+        } elseif (preg_match('/\b(dalam\s*negeri|domestic|local|indonesia|indo)\b/i', $lowerText)) {
             $c['lokasi_tipe'] = 'dalam';
+        }
+        // Fallback: cek teks mentah (rawText) jika normalisasi mengubah kata
+        if ($c['lokasi_tipe'] === null) {
+            $rawLower = strtolower($text);
+            if (strpos($rawLower, 'dalam negeri') !== false || strpos($rawLower, 'dalam negri') !== false) {
+                $c['lokasi_tipe'] = 'dalam';
+            } elseif (strpos($rawLower, 'luar negeri') !== false || strpos($rawLower, 'luar negri') !== false) {
+                $c['lokasi_tipe'] = 'luar';
+            }
         }
 
         // 5. Deteksi Jenjang, Bulan, dan Funding
@@ -1013,7 +1230,7 @@ private function finalizeResponse($answer, $normalizedData = null, $success = tr
         $months = [
             'januari' => ['januari', 'jan'],
             'februari' => ['februari', 'pebruari', 'febuari', 'pebuari', 'feb', 'peb'],
-            'maret' => ['maret', 'mar'],
+            'maret' => ['maret'],
             'april' => ['april', 'apr'],
             'mei' => ['mei'],
             'juni' => ['juni', 'jun'],
@@ -1046,6 +1263,18 @@ private function finalizeResponse($answer, $normalizedData = null, $success = tr
         }
         if (preg_match('/\b(fresh\s*graduate|baru\s+lulus|lulusan\s+baru|tanpa\s+pengalaman)\b/i', $text)) {
             $c['fresh_graduate'] = true;
+        }
+        // Deteksi sorting deadline terdekat
+        if (preg_match('/\b(deadline\s+terdekat|deadline\s+paling\s+dekat|paling\s+dekat\s+deadline|paling\s+dekat|segera\s+tutup|hampir\s+tutup)\b/i', $text)) {
+            $c['sort_deadline'] = true;
+        }
+        // Deteksi filter tahun
+        if (preg_match('/\b(tahun\s+)?(20[2-3][0-9])\b/i', $text, $yearMatch)) {
+            $c['tahun'] = $yearMatch[2];
+        }
+        // Deteksi "masih buka" / "belum tutup"
+        if (preg_match('/\b(masih\s+buka|masih\s+dibuka|belum\s+tutup|yang\s+buka)\b/i', $text)) {
+            $c['masih_buka'] = true;
         }
 
         return $c;
@@ -1116,7 +1345,7 @@ private function finalizeResponse($answer, $normalizedData = null, $success = tr
                 $monthsConfig = [
                     'januari' => ['januari', 'jan'],
                     'februari' => ['februari', 'pebruari', 'febuari', 'pebuari', 'feb', 'peb'],
-                    'maret' => ['maret', 'mar'],
+                    'maret' => ['maret'],
                     'april' => ['april', 'apr'],
                     'mei' => ['mei'],
                     'juni' => ['juni', 'jun'],
@@ -1179,6 +1408,26 @@ private function finalizeResponse($answer, $normalizedData = null, $success = tr
                 $allText = $syarat . ' ' . $deskripsi;
                 if (!preg_match('/\b(fresh\s*graduate|baru\s+lulus|lulusan\s+baru|0[-\s]?[12]\s*tahun|tanpa\s+pengalaman)\b/i', $allText)) {
                     return false;
+                }
+            }
+
+            // Filter tahun di deadline
+            if (!empty($criteria['tahun'])) {
+                $deadline = strtolower($r['deadline'] ?? '');
+                if (!str_contains($deadline, $criteria['tahun'])) return false;
+            }
+
+            // Filter beasiswa yang masih buka (deadline >= hari ini)
+            if (!empty($criteria['masih_buka'])) {
+                $deadline = $r['deadline'] ?? '';
+                if (!empty($deadline) && $deadline !== '-') {
+                    // Coba parse tanggal, skip jika gagal parse
+                    try {
+                        $deadlineDate = \Carbon\Carbon::parse($deadline);
+                        if ($deadlineDate->isPast()) return false;
+                    } catch (\Exception $e) {
+                        // Jika tidak bisa diparse, tetap tampilkan
+                    }
                 }
             }
 
@@ -1547,9 +1796,3 @@ private function finalizeResponse($answer, $normalizedData = null, $success = tr
     }
 
 }
-
-
-
-
-
-
