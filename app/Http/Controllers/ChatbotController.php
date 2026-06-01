@@ -86,16 +86,23 @@ class ChatbotController extends Controller
             }
 
             // 1.7.6 VALIDASI PENDANAAN (Konteks Follow-up: Apakah ini fully funded?)
-            // Skip jika pesan mengandung "apa itu" (definisi) atau konteks pencarian baru
-            $isNewSearch = preg_match('/\b(beasiswa|cari|tampilkan|kasih|ada|mau|coba|list|daftar)\b/i', $message) ||
-                preg_match('/\b(s1|s2|s3|d3|d4|luar negeri|dalam negeri|fully funded|partially funded)\b/i', $message) &&
-                !preg_match('/\b(ini|itu|tersebut|apakah|tipe)\b/i', $message);
+            $hasFundingKeyword = preg_match('/\b(fully\s+funded|full\s+funded|partially\s+funded|partial\s+funded|dana\s+penuh|dana\s+sebagian|biaya\s+penuh|biaya\s+sebagian)\b/i', $message);
             $isDefinisi = preg_match('/\b(apa itu|pengertian|definisi|maksud)\b/i', $message);
-            if ($ragEnabled && !$isNewSearch && !$isDefinisi && (session()->has('selected_scholarship') || session()->has('last_search_results'))) {
-                $fundingRegex = '/\b(beasiswa\s+)?(ini|itu|tersebut|no\s+\d+|nomor\s+\d+|ke\s+\d+)?\s*(apakah|tipe)?\s*(fully\s+funded|full\s+funded|partially\s+funded|partial\s+funded|dana\s+penuh|dana\s+sebagian|biaya\s+penuh|biaya\s+sebagian)\b/i';
+            $hasContextRef = preg_match('/\b(ini|itu|tersebut|apakah|tipe|no\s+\d+|nomor\s+\d+)\b/i', $message);
+            // Trigger jika: ada kata kunci funding + ada referensi konteks + bukan definisi + ada session
+            if ($ragEnabled && $hasFundingKeyword && !$isDefinisi &&
+                ($hasContextRef || session()->has('selected_scholarship')) &&
+                (session()->has('selected_scholarship') || session()->has('last_search_results'))) {
+                // Regex fleksibel: tangkap berbagai urutan kata
+                $fundingRegex  = '/\b(beasiswa\s+)?(ini|itu|tersebut|no\s+\d+|nomor\s+\d+|ke\s+\d+)?\s*(apakah|tipe)?\s*(fully\s+funded|full\s+funded|partially\s+funded|partial\s+funded|dana\s+penuh|dana\s+sebagian|biaya\s+penuh|biaya\s+sebagian)\b/i';
+                $fundingRegex2 = '/(apakah|tipe)\s+(beasiswa\s+)?(ini|itu|tersebut)?\s*(termasuk|kategori|merupakan|adalah|itu)?\s*(fully\s+funded|full\s+funded|partially\s+funded|partial\s+funded)\b/i';
                 if (preg_match($fundingRegex, $message, $matches)) {
                     $ref = trim($matches[2] ?? '');
                     $fundingFound = trim($matches[4]);
+                    return $this->handleFundingValidation($fundingFound, $normalizedData, $ref);
+                } elseif (preg_match($fundingRegex2, $message, $matches)) {
+                    $ref = trim($matches[3] ?? '');
+                    $fundingFound = trim($matches[5]);
                     return $this->handleFundingValidation($fundingFound, $normalizedData, $ref);
                 }
             }
@@ -391,7 +398,7 @@ class ChatbotController extends Controller
             'jepang', 'korea', 'inggris', 'jerman', 'belanda', 'kanada', 'australia', 'malaysia', 'singapura', 'thailand', 'rusia', 'turki', 'mesir', 'prancis', 'amerika'
         ];
         // Kata-kata yang TIDAK boleh dikoreksi Levenshtein (kata lokasi penting)
-        $protectedWords = ['dalam', 'negeri', 'luar', 'buka', 'masih', 'belum', 'tutup', 'bulan', 'tahun'];
+        $protectedWords = ['dalam', 'negeri', 'luar', 'buka', 'masih', 'belum', 'tutup', 'bulan', 'tahun', 'afrika', 'eropa', 'asia', 'benua', 'australia', 'oseania', 'oceania', 'amerika'];
         $words = explode(' ', $text);
         foreach ($words as &$word) {
             // Skip kata yang dilindungi
@@ -578,6 +585,10 @@ private function finalizeResponse($answer, $normalizedData = null, $success = tr
             'tahun 2025', 'tahun 2026', 'tahun 2027',
             'di tahun 2025', 'di tahun 2026', 'di tahun 2027',
             'tahun ini', 'bulan ini', 'bulan depan',
+            'deadline belum lewat', 'belum lewat', 'yang belum tutup',
+            'tanpa toefl', 'tanpa ielts', 'without toefl', 'without ielts',
+            'fully funded tanpa', 'partially funded tanpa',
+            'fresh graduate', 'baru lulus', 'lulusan baru',
         ];
         foreach ($deadlineSearchPhrases as $phrase) {
             if (str_contains($message, $phrase)) return true;
@@ -602,7 +613,10 @@ private function finalizeResponse($answer, $normalizedData = null, $success = tr
         $mustHave = [
             'beasiswa', 'scholarship', 'kuliah', 'studi', 'daftar', 'apply', 'registrasi', 
             'pendaftaran', 's1', 's2', 's3', 'd3', 'd4', 'jenjang', 'sarjana', 'magister', 'doktor',
-            'fully funded', 'partially funded', 'fully fund', 'partial fund', 'dana penuh', 'dana sebagian'
+            'fully funded', 'partially funded', 'fully fund', 'partial fund', 'dana penuh', 'dana sebagian',
+            'tanpa toefl', 'tanpa ielts', 'without toefl', 'without ielts',
+            'fresh graduate', 'baru lulus', 'lulusan baru',
+            'belum lewat', 'belum tutup', 'masih buka', 'masih dibuka',
         ];
         
         $hasStrongKeyword = false;
@@ -851,9 +865,22 @@ private function finalizeResponse($answer, $normalizedData = null, $success = tr
             return 'apply';
         }
         if (str_contains($m, 'benefit') || str_contains($m, 'cakupan') || str_contains($m, 'manfaat')) return 'benefit';
-        if (str_contains($m, 'syarat') || str_contains($m, 'persyaratan') || str_contains($m, 'kualifikasi')) return 'persyaratan';
-        // "deadline" hanya jika bukan query pencarian dengan filter bulan
-        if (!$isSearchPhrase && !$hasFilter && (str_contains($m, 'deadline') || str_contains($m, 'batas') || str_contains($m, 'tutup'))) return 'deadline';
+        // "syarat" hanya detail intent jika tidak ada konteks pencarian filter
+        if (str_contains($m, 'syarat') || str_contains($m, 'persyaratan') || str_contains($m, 'kualifikasi')) {
+            // Jangan anggap detail intent jika ada kata filter pencarian
+            if (preg_match('/\b(fully\s+funded|partially\s+funded|tanpa\s+toefl|tanpa\s+ielts|without\s+toefl|without\s+ielts|luar\s+negeri|dalam\s+negeri|fresh\s+graduate)\b/i', $m)) {
+                return null;
+            }
+            return 'persyaratan';
+        }
+        // "deadline" hanya jika bukan query pencarian dengan filter bulan atau frasa "belum lewat/apa aja"
+        if (!$isSearchPhrase && !$hasFilter && (str_contains($m, 'deadline') || str_contains($m, 'batas') || str_contains($m, 'tutup'))) {
+            // Jangan anggap detail intent jika ada kata-kata pencarian deadline
+            if (preg_match('/\b(belum\s+lewat|apa\s+aja|apa\s+saja|yang\s+mana|list|daftar|semua|masih\s+buka|belum\s+tutup|paling\s+dekat|terdekat)\b/i', $m)) {
+                return null;
+            }
+            return 'deadline';
+        }
         if (str_contains($m, 'dana') || str_contains($m, 'biaya') || str_contains($m, 'funding')) return 'funding';
         if (!$isSearchPhrase && !$hasFilter && (str_contains($m, 'detail') || str_contains($m, 'info') || str_contains($m, 'lengkap'))) return 'detail';
         return null;
@@ -988,12 +1015,22 @@ private function finalizeResponse($answer, $normalizedData = null, $success = tr
         if ($criteria['lokasi_tipe'] === null && $rawCriteria['lokasi_tipe'] !== null) {
             $criteria['lokasi_tipe'] = $rawCriteria['lokasi_tipe'];
         }
-        if (empty($criteria['negara']) && !empty($rawCriteria['negara'])) {
+        // Merge benua dari rawCriteria kalau belum terdeteksi di normalized message
+        if (empty($criteria['benua']) && !empty($rawCriteria['benua'])) {
+            $criteria['benua'] = $rawCriteria['benua'];
+        }
+        // Hanya merge negara dari rawCriteria jika belum ada negara DAN belum ada benua yang terdeteksi
+        if (empty($criteria['negara']) && !empty($rawCriteria['negara']) && empty($criteria['benua'])) {
             $criteria['negara'] = $rawCriteria['negara'];
             $criteria['negara_ori'] = $rawCriteria['negara_ori'];
         }
         if (empty($criteria['bulan']) && !empty($rawCriteria['bulan'])) {
             $criteria['bulan'] = $rawCriteria['bulan'];
+        }
+        // Jika user eksplisit sebut "benua [X]", hapus negara yang auto-terdeteksi agar tidak "bocor" dari session lama
+        if (!empty($criteria['benua']) && preg_match('/\bbenua\b/i', $message)) {
+            $criteria['negara'] = [];
+            $criteria['negara_ori'] = null;
         }
         // Jika tidak ada kriteria apapun dan tidak ada konteks sebelumnya, minta perjelas
         $hasAnyCriteria = !empty($criteria['negara']) || !empty($criteria['benua']) || !empty($criteria['jenjang']) ||
@@ -1003,14 +1040,26 @@ private function finalizeResponse($answer, $normalizedData = null, $success = tr
 
         // Deteksi lokasi fiktif/tidak valid: "beasiswa di [kata]" dimana kata bukan negara/tempat di DB
         // Contoh: "beasiswa di Mars", "beasiswa Hogwarts", "beasiswa di Atlantis"
-        if (!$hasAnyCriteria || empty($criteria['negara'])) {
+        // HANYA jalankan jika tidak ada negara DAN tidak ada benua yang terdeteksi
+        if (empty($criteria['negara']) && empty($criteria['benua'])) {
             $locationMatch = null;
             $skipLocationWords = [
                 'tahun', 'bulan', 'deadline', 'tutup', 'buka', 'dekat', 'terdekat', 'paling',
                 'masih', 'belum', 'terbaru', 'terbuka', 'segera', 'sarjana', 'magister', 'doktor',
                 'fully', 'funded', 'partial', 'partially', 'funded', 'khusus', 'gratis', 'penuh', 'sebagian',
                 'fully funded', 'partially funded', 'fully fund', 'partial fund',
-                '2025', '2026', '2027', '2024', '2028', '2029', '2030',
+                '2020', '2021', '2022', '2023', '2024', '2025', '2026', '2027', '2028', '2029', '2030', '2031',
+                // Kata akademik/jurusan (Bug 3 fix)
+                'mahasiswa', 'jurusan', 'prodi', 'bidang', 'ilmu', 'studi', 'program', 'kuliah',
+                'fakultas', 'informatika', 'biologi', 'teknik', 'hukum', 'ekonomi', 'komputer',
+                'matematika', 'fisika', 'kimia', 'kedokteran', 'farmasi', 'psikologi', 'manajemen',
+                'akuntansi', 'komunikasi', 'pertanian', 'kehutanan', 'perikanan', 'desain', 'seni',
+                'pendidikan', 'sastra', 'geografi', 'sejarah', 'filsafat', 'sosiologi', 'statistika',
+                // Kata benua (Bug 1 fix)
+                'benua', 'eropa', 'asia', 'afrika', 'oceania', 'oseania', 'wilayah',
+                // Kata filter khusus
+                'fresh', 'graduate', 'fresh graduate', 'perempuan', 'wanita', 'toefl', 'ielts',
+                'wawancara', 'interview', 'tanpa', 'tidak', 'without',
             ];
             // Jangan jalankan location detection kalau sudah ada funding criteria
             $hasFundingInText = preg_match('/\b(fully\s+funded|partially\s+funded|fully\s+fund|partial\s+fund|gratis|penuh)\b/i', $rawText);
@@ -1029,7 +1078,17 @@ private function finalizeResponse($answer, $normalizedData = null, $success = tr
                                   'tutup', 'buka', 'deadline', 'masih', 'belum', 'dekat', 'paling',
                                   'sarjana', 'magister', 'doktor', 'gratis', 'penuh',
                                   'lpdp', 'bidikmisi', 'kip', 'unggulan', 'baznas', 'djarum', 'cimb',
-                                  'afirmasi', 'prestasi', 'bidik', 'misi'];
+                                  'afirmasi', 'prestasi', 'bidik', 'misi',
+                                  // Kata jurusan/akademik (Bug 3 fix)
+                                  'mahasiswa', 'jurusan', 'prodi', 'bidang', 'ilmu', 'studi', 'kuliah',
+                                  'informatika', 'biologi', 'teknik', 'komputer', 'hukum', 'ekonomi',
+                                  'matematika', 'fisika', 'kimia', 'kedokteran', 'farmasi', 'psikologi',
+                                  // Kata benua (Bug 1 fix)
+                                  'benua', 'eropa', 'asia', 'afrika', 'wilayah',
+                                  // Kata filter khusus
+                                  'fresh', 'graduate', 'perempuan', 'wanita', 'toefl', 'ielts',
+                                  'wawancara', 'interview', 'tanpa', 'tidak', 'without', 'tahun',
+                                  'nasa', 'hogwarts', 'mars', 'atlantis'];
                     $candidate = strtolower(trim($lm[1]));
                     if (!in_array($candidate, $skipWords)) {
                         $locationMatch = $candidate;
@@ -1062,7 +1121,7 @@ private function finalizeResponse($answer, $normalizedData = null, $success = tr
                 }
                 if (!$isKnownCountry) {
                     $displayName = ucwords($locationMatch);
-                    return $this->finalizeResponse("Mohon maaf, ScholarBot tidak memiliki data beasiswa untuk **$displayName**. ScholarBot hanya menyediakan data beasiswa tahun **2025**, **2026**, dan **2027** untuk lokasi yang tersedia. Coba cari negara lain ya! 😊", $normalizedData);
+                    return $this->finalizeResponse("Mohon maaf, ScholarBot tidak memiliki data beasiswa untuk **$displayName**. Coba cari beasiswa di negara lain yang tersedia ya! 😊", $normalizedData);
                 }
             }
         }
@@ -1087,6 +1146,20 @@ private function finalizeResponse($answer, $normalizedData = null, $success = tr
                 if (!$isNewLevel && !$isNewCountry && !$isNewLokasi && $isNewMajor && !empty($lastCriteria['jenjang'])) {
                     $criteria['jenjang'] = $lastCriteria['jenjang'];
                 }
+                // Kalau benua baru terdeteksi, pastikan negara tidak inherit dari session
+                if (!empty($criteria['benua'])) {
+                    $criteria['negara'] = [];
+                    $criteria['negara_ori'] = null;
+                }
+                // JANGAN inherit bulan dari session lama kalau ini pencarian baru
+                // (mencegah header "jurusan X, deadline bulan Y" yang bocor dari session sebelumnya)
+                if (empty($criteria['bulan'])) {
+                    $criteria['bulan'] = [];
+                }
+                // JANGAN inherit sort_deadline dari session lama
+                if (empty($criteria['sort_deadline'])) {
+                    unset($criteria['sort_deadline']);
+                }
             } else {
                 // Follow-up: pesan pendek atau tidak ada filter baru → merge
                 $isFollowUp = strlen($message) < 25 || preg_match('/\b(doang|cuma|hanya|berapa|itu|tadi|lagi|aja|saja)\b/i', $message);
@@ -1105,42 +1178,57 @@ private function finalizeResponse($answer, $normalizedData = null, $success = tr
         // Tentukan query untuk embedding. Jika query sangat pendek (follow-up), 
         // gunakan gabungan kriteria untuk hasil pencarian yang lebih relevan.
         $searchQuery = $rawText;
-        if (strlen($message) < 15 && !empty($criteria['negara'])) {
+        if (!empty($criteria['benua'])) {
+            // Untuk query benua, paksa search query agar embedding lebih relevan
+            $benuaNames = ['afrika' => 'Afrika', 'asia' => 'Asia', 'eropa' => 'Eropa', 'amerika' => 'Amerika', 'australia' => 'Australia Oseania'];
+            $benuaLabel = $benuaNames[$criteria['benua'][0]] ?? ucwords($criteria['benua'][0]);
+            $jenjangLabel = !empty($criteria['jenjang']) ? ' ' . implode(' ', $criteria['jenjang']) : '';
+            $searchQuery = "beasiswa{$jenjangLabel} {$benuaLabel}";
+        } elseif (strlen($message) < 15 && !empty($criteria['negara'])) {
             $searchQuery = "beasiswa " . implode(' ', $criteria['negara']);
         }
 
-        $embedding = $this->generateEmbedding($searchQuery);
-
-        // Cache hasil hybrid_search selama 30 menit untuk query yang sama
-        $searchCacheKey = 'search_' . md5(strtolower(trim($searchQuery)));
-        $rawResults = \Illuminate\Support\Facades\Cache::remember($searchCacheKey, 1800, function() use ($searchQuery, $embedding) {
-            $results = DB::select("SELECT * FROM hybrid_search(?::text, ?::vector, ?::int)", [
-                $searchQuery, '[' . implode(',', $embedding) . ']', 1000
-            ]);
-
-            // Enrich dengan kolom yang tidak ada di hybrid_search (url_asli, url, jurusan, sumber)
-            if (!empty($results)) {
-                $ids = array_map(fn($r) => $r->id, $results);
-                $extras = DB::table('scholarships')
-                    ->whereIn('id', $ids)
-                    ->get(['id', 'url_asli', 'url', 'jurusan', 'sumber'])
-                    ->keyBy('id');
-
-                foreach ($results as $r) {
-                    $extra = $extras[$r->id] ?? null;
-                    if ($extra) {
-                        $r->url_asli = $extra->url_asli ?? null;
-                        $r->url      = $extra->url ?? null;
-                        $r->jurusan  = $extra->jurusan ?? null;
-                        $r->sumber   = $extra->sumber ?? null;
-                    }
+        // Jika filter benua saja (tanpa negara spesifik), bypass hybrid_search dan query langsung dari DB
+        // karena embedding tidak relevan untuk beasiswa multi-benua (misal "Afrika" = Singapore multi-benua)
+        if (!empty($criteria['benua'])) {
+            // Paksa hapus negara agar header "di wilayah X" tampil benar, bukan "di Amerika Serikat" dll
+            $criteria['negara'] = [];
+            $criteria['negara_ori'] = null;
+            $dbQuery = DB::table('scholarships');
+            $benuaFilter = $criteria['benua'][0];
+            $benuaAliases = ['afrika' => ['Afrika', 'Africa'], 'eropa' => ['Eropa', 'Europe'], 'asia' => ['Asia'], 'amerika' => ['Amerika', 'America'], 'australia' => ['Australia', 'Oceania', 'Oseania']];
+            $aliases = $benuaAliases[$benuaFilter] ?? [ucwords($benuaFilter)];
+            $dbQuery->where(function($q) use ($aliases) {
+                foreach ($aliases as $alias) {
+                    $q->orWhere('benua', 'like', '%' . $alias . '%');
                 }
+            });
+            if (!empty($criteria['jenjang'])) {
+                $dbQuery->where(function($q) use ($criteria) {
+                    foreach ($criteria['jenjang'] as $j) {
+                        $q->orWhere('jenjang', 'like', '%' . $j . '%');
+                    }
+                });
             }
+            if (!empty($criteria['funding'])) {
+                $dbQuery->where('kategori', 'like', '%' . $criteria['funding'] . '%');
+            }
+            $rawResults = $dbQuery->get()->toArray();
+            shuffle($rawResults);
+            $filtered = $rawResults;
+        } else {
+            $embedding = $this->generateEmbedding($searchQuery);
 
-            return $results;
-        });
+            // Cache hasil hybrid_search selama 30 menit untuk query yang sama
+            $searchCacheKey = 'search_' . md5(strtolower(trim($searchQuery)));
+            $rawResults = \Illuminate\Support\Facades\Cache::remember($searchCacheKey, 1800, function() use ($searchQuery, $embedding) {
+                return DB::select("SELECT * FROM hybrid_search(?::text, ?::vector, ?::int)", [
+                    $searchQuery, '[' . implode(',', $embedding) . ']', 1000
+                ]);
+            });
 
-        $filtered = $this->applyStrictFilters($rawResults, $criteria);
+            $filtered = $this->applyStrictFilters($rawResults, $criteria);
+        }
 
         // Jika filter tahun 2025, 2026 atau 2027 tapi kosong, hapus filter tahun dan coba lagi tanpa filter tahun
         if (empty($filtered) && !empty($criteria['tahun']) && in_array($criteria['tahun'], ['2025', '2026', '2027'])) {
@@ -1184,6 +1272,11 @@ private function finalizeResponse($answer, $normalizedData = null, $success = tr
         }
 
         if (!empty($criteria['benua']) && empty($criteria['negara'])) {
+            shuffle($filtered);
+        }
+
+        // Jika tidak ada filter lokasi sama sekali, shuffle agar LN dan DN tercampur (tidak hanya DN)
+        if (empty($criteria['negara']) && empty($criteria['benua']) && $criteria['lokasi_tipe'] === null && empty($criteria['sort_deadline'])) {
             shuffle($filtered);
         }
 
@@ -1236,7 +1329,8 @@ private function finalizeResponse($answer, $normalizedData = null, $success = tr
             $namaBeasiswa = trim($s['nama_beasiswa']);
             if ($showDeadline && !empty($s['deadline']) && $s['deadline'] !== '-') {
                 $deadlineFormatted = $this->formatDeadline($s['deadline']);
-                $resp .= ($i + 1) . "\. **{$namaBeasiswa}** - Deadline: " . $deadlineFormatted . "\n\n";
+                $jenjangInfo = !empty($s['jenjang']) && $s['jenjang'] !== '-' ? ' (' . $s['jenjang'] . ')' : '';
+                $resp .= ($i + 1) . "\. **{$namaBeasiswa}**{$jenjangInfo} - Deadline: " . $deadlineFormatted . "\n\n";
             } else {
                 $resp .= ($i + 1) . "\. **{$namaBeasiswa}** - " . ($s['negara'] ?? 'Luar Negeri') . " (" . ($s['jenjang'] ?? '-') . ")\n\n";
             }
@@ -1335,6 +1429,8 @@ private function finalizeResponse($answer, $normalizedData = null, $success = tr
 
         // 3. Deteksi Benua
         $continents = ['eropa', 'asia', 'australia', 'afrika', 'amerika'];
+        // Daftar negara yang namanya mengandung kata benua — jangan ikut terfilter saat user sebut benua
+        $countriesContainingContinentName = ['rusia', 'mauritania', 'guinea', 'papua nugini', 'papua new guinea', 'asia tenggara'];
         foreach ($continents as $con) {
             // Gunakan Regex dengan word boundary agar "beasiswa" tidak terdeteksi sebagai "asia"
             // Mendukung pencarian "Amerika" dengan typo atau bahasa Inggris (America)
@@ -1349,6 +1445,27 @@ private function finalizeResponse($answer, $normalizedData = null, $success = tr
             
             if (preg_match($pattern, $text)) {
                 $c['benua'][] = $con;
+            }
+        }
+
+        // Jika benua terdeteksi, hapus negara yang masuk secara false-positive
+        // karena nama negaranya mengandung string nama benua (misal "rusia" mengandung "asia")
+        if (!empty($c['benua'])) {
+            $c['negara'] = array_filter($c['negara'], function($neg) use ($countriesContainingContinentName) {
+                return !in_array(strtolower($neg), $countriesContainingContinentName);
+            });
+            $c['negara'] = array_values($c['negara']);
+            // Juga hapus negara yang hanya terdeteksi karena substring benua
+            // misal user ketik "asia" → jangan ikut detect "rusia", "malaysia" dari benua "asia"
+            foreach ($c['benua'] as $benua) {
+                $c['negara'] = array_filter($c['negara'], function($neg) use ($benua) {
+                    // Hapus negara jika satu-satunya alasan ia masuk adalah karena mengandung nama benua
+                    $negaraLower = strtolower($neg);
+                    // "rusia" mengandung "sia" dari "asia", "mauritania" mengandung "afrik" tidak, 
+                    // tapi kita block semua negara yang mengandung tepat string benua
+                    return !str_contains($negaraLower, $benua) || strlen($neg) <= strlen($benua) + 2;
+                });
+                $c['negara'] = array_values($c['negara']);
             }
         }
 
@@ -1402,9 +1519,18 @@ private function finalizeResponse($answer, $normalizedData = null, $success = tr
         ];
         foreach ($months as $m_key => $variants) {
             foreach ($variants as $v) {
-                if (str_contains($text, $v)) {
-                    $c['bulan'][] = $m_key;
-                    break;
+                // Untuk singkatan pendek (<=4 huruf), gunakan word boundary agar tidak salah deteksi
+                // misal: "okt" di "kedokteran", "sep" di "persepsi", "jan" di "jangan", dll
+                if (strlen($v) <= 4) {
+                    if (preg_match('/\b' . preg_quote($v, '/') . '\b/i', $text)) {
+                        $c['bulan'][] = $m_key;
+                        break;
+                    }
+                } else {
+                    if (str_contains($text, $v)) {
+                        $c['bulan'][] = $m_key;
+                        break;
+                    }
                 }
             }
 } if (str_contains($text, 'fully funded')) {
@@ -1433,8 +1559,8 @@ private function finalizeResponse($answer, $normalizedData = null, $success = tr
         if (preg_match('/\b(tahun\s+)?(20[2-3][0-9])\b/i', $text, $yearMatch)) {
             $c['tahun'] = $yearMatch[2];
         }
-        // Deteksi "masih buka" / "belum tutup"
-        if (preg_match('/\b(masih\s+buka|masih\s+dibuka|belum\s+tutup|yang\s+buka)\b/i', $text)) {
+        // Deteksi "masih buka" / "belum tutup" / "belum lewat"
+        if (preg_match('/\b(masih\s+buka|masih\s+dibuka|belum\s+tutup|yang\s+buka|belum\s+lewat|yang\s+belum\s+tutup|deadline\s+belum|belum\s+berakhir)\b/i', $text)) {
             $c['masih_buka'] = true;
         }
 
@@ -1474,18 +1600,34 @@ private function finalizeResponse($answer, $normalizedData = null, $success = tr
             if (!empty($criteria['benua'])) {
                 $m = false;
                 $rowBenua = strtolower($r['benua'] ?? '');
+                $rowNegaraBenua = strtolower($r['negara'] ?? '');
+                // Mapping negara per benua sebagai fallback jika kolom benua kosong/format beda
+                $negaraPerBenua = [
+                    'afrika' => ['afrika selatan', 'africa', 'mesir', 'nigeria', 'ethiopia', 'kenya', 'ghana', 'tanzania', 'mozambik', 'kamerun', 'senegal', 'zimbabwe', 'zambia', 'botswana', 'rwanda', 'uganda', 'mali', 'tunisia', 'maroko', 'aljazair', 'libya', 'sudan', 'somalia', 'madagaskar'],
+                ];
                 foreach ($criteria['benua'] as $c) {
                     // Cek keberadaan benua dengan regex agar lebih presisi
                     // Mendukung padanan bahasa Inggris di database (e.g. amerika -> america)
                     $searchTerms = [$c];
                     if ($c === 'amerika') $searchTerms[] = 'america';
-                    if ($c === 'eropa') $searchTerms[] = 'europe';
+                    if ($c === 'eropa')   $searchTerms[] = 'europe';
                     if ($c === 'australia') $searchTerms[] = 'oceania';
+                    if ($c === 'afrika')  $searchTerms[] = 'africa';
 
                     foreach ($searchTerms as $term) {
-                        if (preg_match('/\b' . preg_quote($term, '/') . '\b/i', $rowBenua)) {
+                        // Gunakan stripos agar match di string multi-benua seperti "Eropa & Afrika"
+                        if (stripos($rowBenua, $term) !== false) {
                             $m = true;
                             break 2;
+                        }
+                    }
+                    // Fallback: kalau kolom benua tidak match, cek kolom negara untuk negara-negara Afrika
+                    if (!$m && isset($negaraPerBenua[$c])) {
+                        foreach ($negaraPerBenua[$c] as $neg) {
+                            if (str_contains($rowNegaraBenua, $neg)) {
+                                $m = true;
+                                break 2;
+                            }
                         }
                     }
                 }
