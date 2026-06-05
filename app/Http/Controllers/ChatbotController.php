@@ -89,8 +89,10 @@ class ChatbotController extends Controller
             $hasFundingKeyword = preg_match('/\b(fully\s+funded|full\s+funded|partially\s+funded|partial\s+funded|dana\s+penuh|dana\s+sebagian|biaya\s+penuh|biaya\s+sebagian)\b/i', $message);
             $isDefinisi = preg_match('/\b(apa itu|pengertian|definisi|maksud)\b/i', $message);
             $hasContextRef = preg_match('/\b(ini|itu|tersebut|apakah|tipe|no\s+\d+|nomor\s+\d+)\b/i', $message);
-            // Trigger jika: ada kata kunci funding + ada referensi konteks + bukan definisi + ada session
-            if ($ragEnabled && $hasFundingKeyword && !$isDefinisi &&
+            // Jika ada lokasi/filter baru bersama funding keyword → ini pencarian baru, bukan validasi
+            $hasNewSearchFilter = preg_match('/\b(luar\s+negeri|dalam\s+negeri|luar\s+negri|dalam\s+negri|s1|s2|s3|d3|d4|jepang|korea|australia|eropa|asia|inggris|jerman|belanda|kanada|cari|carikan|ada\s+\w|ada\?)\b/i', $message);
+            // Trigger jika: ada kata kunci funding + ada referensi konteks + bukan definisi + ada session + BUKAN pencarian baru dengan filter lokasi
+            if ($ragEnabled && $hasFundingKeyword && !$isDefinisi && !$hasNewSearchFilter &&
                 ($hasContextRef || session()->has('selected_scholarship')) &&
                 (session()->has('selected_scholarship') || session()->has('last_search_results'))) {
                 // Regex fleksibel: tangkap berbagai urutan kata
@@ -116,8 +118,11 @@ class ChatbotController extends Controller
                 $s = session()->get('selected_scholarship');
                 if (is_array($s)) {
                     $name = $s['nama_beasiswa'] ?? 'Beasiswa ini';
-                    $urlAsli = $s['url_asli'] ?? null;
-                    $urlSchoters = $s['url'] ?? null;
+                    // Coba berbagai nama kolom yang mungkin
+                    $urlAsli = $s['url_asli'] ?? $s['link'] ?? $s['website'] ?? $s['url_website'] ?? $s['link_resmi'] ?? null;
+                    $urlSchoters = $s['url'] ?? $s['url_scholters'] ?? $s['link_scholters'] ?? null;
+                    // Jika urlAsli sama dengan urlSchoters, prioritaskan urlAsli saja
+                    if ($urlAsli && $urlAsli === $urlSchoters) $urlSchoters = null;
                     if ($urlAsli) {
                         $ans = "Berikut link resmi untuk **$name**:\n\n🌐 $urlAsli";
                     } elseif ($urlSchoters) {
@@ -141,12 +146,16 @@ class ChatbotController extends Controller
                 preg_match('/\b(nomor|no|nmr|#)\s*(\d+).*\b(link|url|tautan)\b/i', $message, $linkMatch2)) {
                 $displayNum = isset($linkMatch[3]) ? (int)$linkMatch[3] : (int)$linkMatch2[2];
                 $allResults = session()->get('last_search_all_results', []);
-                $idx = $displayNum - 1;
+                $page = session()->get('last_search_page', 1);
+                $pageStartIndex = ($page - 1) * 5;
+                $globalIdx = ($displayNum <= 5) ? $pageStartIndex + ($displayNum - 1) : ($displayNum - 1);
+                $idx = ($globalIdx >= 0 && $globalIdx < count($allResults)) ? $globalIdx : ($displayNum - 1);
                 if ($idx >= 0 && $idx < count($allResults)) {
                     $s = (array)$allResults[$idx];
                     $name = $s['nama_beasiswa'] ?? 'Beasiswa ini';
-                    $urlAsli = $s['url_asli'] ?? null;
-                    $urlSchoters = $s['url'] ?? null;
+                    $urlAsli = $s['url_asli'] ?? $s['link'] ?? $s['website'] ?? $s['url_website'] ?? $s['link_resmi'] ?? null;
+                    $urlSchoters = $s['url'] ?? $s['url_scholters'] ?? $s['link_scholters'] ?? null;
+                    if ($urlAsli && $urlAsli === $urlSchoters) $urlSchoters = null;
                     if ($urlAsli) {
                         $ans = "Berikut link resmi untuk **$name**:\n\n🌐 $urlAsli";
                     } elseif ($urlSchoters) {
@@ -459,10 +468,15 @@ private function finalizeResponse($answer, $normalizedData = null, $success = tr
         $greetings = ['halo', 'hai', 'hi', 'hello', 'pagi', 'siang', 'sore', 'malam', 'permisi', 'assalamualaikum'];
         $intents = ['mau nanya', 'tanya dong', 'boleh tanya', 'nanya dong', 'saya mau tanya', 'boleh nanya', 'bisakah saya tanya', 'ada yang mau saya tanyakan', 'tanya ngga'];
         
+        // Normalisasi typo sapaan: "haloo" → "halo", "haii" → "hai", "helloo" → "hello"
+        $greetingNorm = preg_replace('/\b(hal+o+|ha+l+o)\b/i', 'halo', $message);
+        $greetingNorm = preg_replace('/\b(ha+i+|hi+)\b/i', 'hai', $greetingNorm);
+        $greetingNorm = preg_replace('/\b(hell+o+)\b/i', 'hello', $greetingNorm);
+
         // Gunakan Regex agar "p" tidak mendeteksi huruf di tengah kata (seperti depok)
         $isGreet = false;
         foreach (array_merge($greetings, $intents) as $word) {
-            if (preg_match('/\b' . preg_quote($word, '/') . '\b/i', $message)) {
+            if (preg_match('/\b' . preg_quote($word, '/') . '\b/i', $greetingNorm)) {
                 $isGreet = true;
                 break;
             }
@@ -617,6 +631,7 @@ private function finalizeResponse($answer, $normalizedData = null, $success = tr
             'tanpa toefl', 'tanpa ielts', 'without toefl', 'without ielts',
             'fresh graduate', 'baru lulus', 'lulusan baru',
             'belum lewat', 'belum tutup', 'masih buka', 'masih dibuka',
+            'bulan ini', 'bulan depan',
         ];
         
         $hasStrongKeyword = false;
@@ -962,7 +977,7 @@ private function finalizeResponse($answer, $normalizedData = null, $success = tr
 
         $resp = "Berikut daftar beasiswa selanjutnya:\n\n";
         $lastCriteria = session()->get('last_search_criteria', []);
-        $showDeadline = !empty($lastCriteria['bulan']) || !empty($lastCriteria['sort_deadline']);
+        $showDeadline = !empty($lastCriteria['bulan']) || !empty($lastCriteria['sort_deadline']) || !empty($lastCriteria['masih_buka']);
         foreach ($limitedResults as $i => $s) {
             $s = (array) $s;
             $namaBeasiswa = trim($s['nama_beasiswa']);
@@ -1256,6 +1271,19 @@ private function finalizeResponse($answer, $normalizedData = null, $success = tr
 
         // Sort by deadline jika diminta
         if (!empty($criteria['sort_deadline'])) {
+            $today = \Carbon\Carbon::today();
+            // Hapus yang deadlinenya sudah lewat (kecuali jika tidak ada deadline)
+            $filtered = array_filter($filtered, function($item) use ($today) {
+                $item = (array)$item;
+                $deadline = $item['deadline'] ?? '';
+                if (empty($deadline) || $deadline === '-') return true; // Tetap tampilkan jika tidak ada deadline
+                try {
+                    return \Carbon\Carbon::parse($deadline)->greaterThanOrEqualTo($today);
+                } catch (\Exception $e) {
+                    return true;
+                }
+            });
+            $filtered = array_values($filtered);
             usort($filtered, function($a, $b) {
                 $a = (array)$a;
                 $b = (array)$b;
@@ -1323,7 +1351,7 @@ private function finalizeResponse($answer, $normalizedData = null, $success = tr
             }
         }
 
-        $showDeadline = !empty($criteria['bulan']) || !empty($criteria['sort_deadline']);
+        $showDeadline = !empty($criteria['bulan']) || !empty($criteria['sort_deadline']) || !empty($criteria['masih_buka']);
         foreach ($limitedResults as $i => $s) {
             $s = (array) $s;
             $namaBeasiswa = trim($s['nama_beasiswa']);
@@ -1471,9 +1499,15 @@ private function finalizeResponse($answer, $normalizedData = null, $success = tr
 
         // 4. Deteksi Tipe Lokasi (Luar/Dalam Negeri)
         $lowerText = strtolower($text);
-        if (preg_match('/\b(luar\s*negeri|international|abroad|luar\s+negeri)\b/i', $lowerText)) {
+        if (preg_match('/\b(luar\s*negeri|luar\s*negri|international|abroad)\b/i', $lowerText)) {
             $c['lokasi_tipe'] = 'luar';
-        } elseif (preg_match('/\b(dalam\s*negeri|domestic|local|indonesia|indo)\b/i', $lowerText)) {
+        } elseif (preg_match('/\b(ln)\b/i', $lowerText)) {
+            // "LN" singkatan Luar Negeri — hanya jika standalone (bukan bagian kata lain)
+            $c['lokasi_tipe'] = 'luar';
+        } elseif (preg_match('/\b(dalam\s*negeri|dalam\s*negri|domestic|local|indonesia|indo)\b/i', $lowerText)) {
+            $c['lokasi_tipe'] = 'dalam';
+        } elseif (preg_match('/\b(dn)\b/i', $lowerText)) {
+            // "DN" singkatan Dalam Negeri
             $c['lokasi_tipe'] = 'dalam';
         }
         // Fallback: cek teks mentah (rawText) jika normalisasi mengubah kata
@@ -1517,6 +1551,16 @@ private function finalizeResponse($answer, $normalizedData = null, $success = tr
             'november' => ['november', 'nopember', 'nov'],
             'desember' => ['desember', 'des']
         ];
+        // Deteksi "bulan ini" dan "bulan depan" → konversi ke nama bulan aktual
+        $monthNames = array_keys($months);
+        if (preg_match('/\bbulan\s+ini\b/i', $text)) {
+            $currentMonthIdx = (int)\Carbon\Carbon::now()->format('n') - 1; // 0-indexed
+            $c['bulan'][] = $monthNames[$currentMonthIdx];
+        }
+        if (preg_match('/\bbulan\s+depan\b/i', $text)) {
+            $nextMonthIdx = (int)\Carbon\Carbon::now()->addMonth()->format('n') - 1;
+            $c['bulan'][] = $monthNames[$nextMonthIdx];
+        }
         foreach ($months as $m_key => $variants) {
             foreach ($variants as $v) {
                 // Untuk singkatan pendek (<=4 huruf), gunakan word boundary agar tidak salah deteksi
