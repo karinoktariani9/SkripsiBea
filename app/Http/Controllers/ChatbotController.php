@@ -77,11 +77,44 @@ class ChatbotController extends Controller
 
             // 1.7.5 VALIDASI JURUSAN (Konteks Follow-up: Apakah beasiswa ini ada jurusan X?)
             if ($ragEnabled && (session()->has('selected_scholarship') || session()->has('last_search_results'))) {
-                // Pola: "beasiswa ini ada jurusan X?", "ada jurusan Y?", "no 1 ada jurusan Z?"
+                // Pola 0: "jurusannya apa aja?", "jurusan apa yang tersedia?", "ada jurusan apa?"
+                if (preg_match('/\b(jurusan|prodi|bidang)\s*(apa|apa\s+aja|apa\s+saja|apa\s+yang|yang\s+ada|tersedia|ada\s+apa|apa\s+ada)?\s*(aja|saja|tersedia|yang\s+ada|\?)?\s*\??$/i', $message) &&
+                    !preg_match('/\b(ada|tersedia|punya|bisa)\s+(jurusan|prodi)\s+\w/i', $message) &&
+                    session()->has('selected_scholarship')) {
+                    $s = session()->get('selected_scholarship');
+                    $nama = $s['nama_beasiswa'] ?? 'Beasiswa ini';
+                    $jurusan = $s['jurusan'] ?? null;
+                    if (!empty($jurusan) && $jurusan !== '-') {
+                        if (strtolower(trim($jurusan)) === 'semua jurusan') {
+                            return $this->finalizeResponse("Beasiswa **$nama** terbuka untuk **Semua Jurusan**! 😊\n\nAda lagi yang ingin Anda ketahui?", $normalizedData);
+                        }
+                        // Format list jurusan agar mudah dibaca
+                        $list = array_map('trim', explode(',', $jurusan));
+                        $formatted = implode("\n- ", $list);
+                        return $this->finalizeResponse("Beasiswa **$nama** tersedia untuk jurusan berikut:\n\n- $formatted\n\nAda jurusan tertentu yang ingin Anda cek? 😊", $normalizedData);
+                    }
+                    return $this->finalizeResponse("Maaf, informasi jurusan untuk **$nama** tidak tersedia di dataset. Coba ketik **'Syarat'** untuk melihat detail lengkapnya. 😊", $normalizedData);
+                }
+                // Pola 1: "ada jurusan X?", "beasiswa ini ada jurusan X?", "no 1 ada jurusan Z?"
                 if (preg_match('/\b(beasiswa\s+)?(ini|itu|tersebut|no\s+\d+|nomor\s+\d+|ke\s+\d+)?\s*(ada|tersedia|punya|bisa)\s+(jurusan|prodi|bidang|fakultas|studi)\s+([a-z\s]+)/i', $message, $matches)) {
                     $ref = trim($matches[2] ?? '');
                     $majorFound = trim($matches[5]);
-                    return $this->handleMajorValidation($majorFound, $normalizedData, $ref);
+                    // Hapus kata informal / filler di akhir query jurusan
+                    $majorFound = preg_replace('/\b(ga|gak|ngga|nggak|tidak|kan|ya|kah|dong|deh|nih|sih|gitu|nya|ada|tidak|ngga|nggak|ga\?|\?)+$/i', '', $majorFound);
+                    $majorFound = trim($majorFound);
+                    if (!empty($majorFound)) {
+                        return $this->handleMajorValidation($majorFound, $normalizedData, $ref);
+                    }
+                }
+                // Pola 2: "jurusan X ada ga?", "prodi teknik ada?", "jurusan informatika tersedia?"
+                if (preg_match('/\b(jurusan|prodi|bidang|studi)\s+([a-z\s]+?)\s*(ada|tersedia|punya|bisa|ga|gak|ngga|nggak|tidak|\?)/i', $message, $matches)) {
+                    $ref = '';
+                    $majorFound = trim($matches[2]);
+                    $majorFound = preg_replace('/\b(ga|gak|ngga|nggak|tidak|kan|ya|kah|dong|deh|nih|sih|\?)+$/i', '', $majorFound);
+                    $majorFound = trim($majorFound);
+                    if (!empty($majorFound) && strlen($majorFound) >= 3) {
+                        return $this->handleMajorValidation($majorFound, $normalizedData, $ref);
+                    }
                 }
             }
 
@@ -112,7 +145,7 @@ class ChatbotController extends Controller
             // 2. DETAIL & SELECTION LOGIC (Prioritas Tinggi)
             
             // 4.4.5 LINK TANPA NOMOR ("berikan linknya", "link beasiswanya") - pakai selected_scholarship
-            if (preg_match('/\b(link|url|tautan|linknya|websitenya|situsnya)\b/i', $message) &&
+            if (preg_match('/\b(link|url|tautan|linknya|websitenya|situsnya|kasih link|kasih url|share link|tunjukkan link|minta link)\b/i', $message) &&
                 !preg_match('/\b(nomor|no|nmr|#)\s*\d+/i', $message) &&
                 session()->has('selected_scholarship')) {
                 $s = session()->get('selected_scholarship');
@@ -152,6 +185,11 @@ class ChatbotController extends Controller
                 $idx = ($globalIdx >= 0 && $globalIdx < count($allResults)) ? $globalIdx : ($displayNum - 1);
                 if ($idx >= 0 && $idx < count($allResults)) {
                     $s = (array)$allResults[$idx];
+                    // Fetch full data from DB (hybrid_search tidak return url_asli, url, dll)
+                    if (!empty($s['id'])) {
+                        $fullRow = \Illuminate\Support\Facades\DB::table('scholarships')->where('id', $s['id'])->first();
+                        if ($fullRow) $s = array_merge($s, (array)$fullRow);
+                    }
                     $name = $s['nama_beasiswa'] ?? 'Beasiswa ini';
                     $urlAsli = $s['url_asli'] ?? $s['link'] ?? $s['website'] ?? $s['url_website'] ?? $s['link_resmi'] ?? null;
                     $urlSchoters = $s['url'] ?? $s['url_scholters'] ?? $s['link_scholters'] ?? null;
@@ -237,6 +275,14 @@ class ChatbotController extends Controller
 
                 if (isset($allResults[$globalIndex])) {
                     $selected = (array)$allResults[$globalIndex];
+                    // hybrid_search tidak return semua kolom (url_asli, url, jurusan, sumber hilang)
+                    // Fetch data lengkap dari DB berdasarkan id
+                    if (!empty($selected['id'])) {
+                        $fullData = \Illuminate\Support\Facades\DB::table('scholarships')->where('id', $selected['id'])->first();
+                        if ($fullData) {
+                            $selected = array_merge($selected, (array)$fullData);
+                        }
+                    }
                     session()->put('selected_scholarship', $selected);
 
                     // Jika ada intent detail sekaligus (misal "benefit no 1")
@@ -1153,8 +1199,9 @@ private function finalizeResponse($answer, $normalizedData = null, $success = tr
             $isNewLokasi = $criteria['lokasi_tipe'] !== null;
             $hasFunding = !empty($criteria['funding']);
 
-            // Jika ada kriteria BARU yang eksplisit (negara baru, jurusan baru, lokasi baru) → RESET konteks lama
-            $isNewSearch = $isNewCountry || $isNewMajor || $isNewLokasi || $hasFunding;
+            // Jika ada kriteria BARU yang eksplisit (negara baru, jurusan baru, lokasi baru, bulan baru) → RESET konteks lama
+            $isNewBulan = !empty($criteria['bulan']);
+            $isNewSearch = $isNewCountry || $isNewMajor || $isNewLokasi || $hasFunding || $isNewBulan;
             if ($isNewSearch) {
                 // Pakai kriteria baru saja, jangan merge dengan lama
                 // Tapi tetap inherit jenjang kalau tidak disebutkan ulang dan bukan topik baru total
@@ -1272,26 +1319,43 @@ private function finalizeResponse($answer, $normalizedData = null, $success = tr
         // Sort by deadline jika diminta
         if (!empty($criteria['sort_deadline'])) {
             $today = \Carbon\Carbon::today();
+            $parseIdDate = function($deadline) {
+                $monthMap = [
+                    'jan' => 'January', 'feb' => 'February', 'mar' => 'March',
+                    'apr' => 'April', 'mei' => 'May', 'jun' => 'June',
+                    'jul' => 'July', 'agu' => 'August', 'agt' => 'August',
+                    'sep' => 'September', 'okt' => 'October', 'nov' => 'November',
+                    'des' => 'December', 'januari' => 'January', 'februari' => 'February',
+                    'maret' => 'March', 'april' => 'April', 'juni' => 'June',
+                    'juli' => 'July', 'agustus' => 'August', 'september' => 'September',
+                    'oktober' => 'October', 'november' => 'November', 'desember' => 'December',
+                ];
+                $en = strtolower($deadline);
+                foreach ($monthMap as $id => $enMonth) {
+                    $en = preg_replace('/\b' . preg_quote($id, '/') . '\b/i', $enMonth, $en);
+                }
+                return \Carbon\Carbon::parse($en);
+            };
             // Hapus yang deadlinenya sudah lewat (kecuali jika tidak ada deadline)
-            $filtered = array_filter($filtered, function($item) use ($today) {
+            $filtered = array_filter($filtered, function($item) use ($today, $parseIdDate) {
                 $item = (array)$item;
                 $deadline = $item['deadline'] ?? '';
-                if (empty($deadline) || $deadline === '-') return true; // Tetap tampilkan jika tidak ada deadline
+                if (empty($deadline) || $deadline === '-') return true;
                 try {
-                    return \Carbon\Carbon::parse($deadline)->greaterThanOrEqualTo($today);
+                    return $parseIdDate($deadline)->greaterThanOrEqualTo($today);
                 } catch (\Exception $e) {
                     return true;
                 }
             });
             $filtered = array_values($filtered);
-            usort($filtered, function($a, $b) {
+            usort($filtered, function($a, $b) use ($parseIdDate) {
                 $a = (array)$a;
                 $b = (array)$b;
                 $dateA = $a['deadline'] ?? '';
                 $dateB = $b['deadline'] ?? '';
                 try {
-                    $tA = !empty($dateA) && $dateA !== '-' ? \Carbon\Carbon::parse($dateA)->timestamp : PHP_INT_MAX;
-                    $tB = !empty($dateB) && $dateB !== '-' ? \Carbon\Carbon::parse($dateB)->timestamp : PHP_INT_MAX;
+                    $tA = !empty($dateA) && $dateA !== '-' ? $parseIdDate($dateA)->timestamp : PHP_INT_MAX;
+                    $tB = !empty($dateB) && $dateB !== '-' ? $parseIdDate($dateB)->timestamp : PHP_INT_MAX;
                     return $tA - $tB;
                 } catch (\Exception $e) {
                     return 0;
@@ -1596,7 +1660,7 @@ private function finalizeResponse($answer, $normalizedData = null, $success = tr
             $c['fresh_graduate'] = true;
         }
         // Deteksi sorting deadline terdekat
-        if (preg_match('/\b(deadline\s+terdekat|deadline\s+paling\s+dekat|paling\s+dekat\s+deadline|paling\s+dekat|segera\s+tutup|hampir\s+tutup|deadline\s+dekat|yang\s+dekat\s+deadline)\b/i', $text)) {
+        if (preg_match('/\b(deadline\s+(terdekat|terdeket|terdket)|deadline\s+paling\s+dekat|paling\s+dekat\s+deadline|paling\s+dekat|segera\s+tutup|hampir\s+tutup|deadline\s+dekat|yang\s+dekat\s+deadline|(terdekat|terdeket))\b/i', $text)) {
             $c['sort_deadline'] = true;
         }
         // Deteksi filter tahun
@@ -1768,9 +1832,23 @@ private function finalizeResponse($answer, $normalizedData = null, $success = tr
             if (!empty($criteria['masih_buka'])) {
                 $deadline = $r['deadline'] ?? '';
                 if (!empty($deadline) && $deadline !== '-') {
-                    // Coba parse tanggal, skip jika gagal parse
                     try {
-                        $deadlineDate = \Carbon\Carbon::parse($deadline);
+                        // Carbon tidak bisa parse nama bulan Indonesia, konversi dulu
+                        $monthMap = [
+                            'jan' => 'January', 'feb' => 'February', 'mar' => 'March',
+                            'apr' => 'April', 'mei' => 'May', 'jun' => 'June',
+                            'jul' => 'July', 'agu' => 'August', 'agt' => 'August',
+                            'sep' => 'September', 'okt' => 'October', 'nov' => 'November',
+                            'des' => 'December', 'januari' => 'January', 'februari' => 'February',
+                            'maret' => 'March', 'april' => 'April', 'juni' => 'June',
+                            'juli' => 'July', 'agustus' => 'August', 'september' => 'September',
+                            'oktober' => 'October', 'november' => 'November', 'desember' => 'December',
+                        ];
+                        $deadlineEn = strtolower($deadline);
+                        foreach ($monthMap as $id => $en) {
+                            $deadlineEn = preg_replace('/\b' . preg_quote($id, '/') . '\b/i', $en, $deadlineEn);
+                        }
+                        $deadlineDate = \Carbon\Carbon::parse($deadlineEn);
                         if ($deadlineDate->isPast()) return false;
                     } catch (\Exception $e) {
                         // Jika tidak bisa diparse, tetap tampilkan
@@ -1972,18 +2050,72 @@ private function finalizeResponse($answer, $normalizedData = null, $success = tr
         $major = strtolower(trim($major));
         $ref = strtolower(trim($ref ?? ''));
 
+        // Synonym map: kata yang user ketik → kata-kata yang mungkin ada di dataset
+        $majorSynonyms = [
+            'informatika'        => ['informatika', 'ilmu komputer', 'teknik komputer', 'teknologi informasi', 'sistem informasi', 'computer science', 'information technology', 'computing', 'ilmu komputasi', 'software engineering', 'rekayasa perangkat lunak'],
+            'komputer'           => ['ilmu komputer', 'teknik komputer', 'teknologi informasi', 'sistem informasi', 'computer science', 'information technology', 'informatika'],
+            'teknologi informasi'=> ['teknologi informasi', 'information technology', 'ilmu komputer', 'sistem informasi', 'informatika'],
+            'sistem informasi'   => ['sistem informasi', 'information systems', 'teknologi informasi', 'ilmu komputer'],
+            'ilmu data'          => ['ilmu data', 'data science', 'statistika', 'analitik data'],
+            'kedokteran'         => ['kedokteran', 'ilmu kedokteran', 'medicine', 'medical', 'kesehatan', 'ilmu kesehatan', 'biomedis', 'ilmu biomedis'],
+            'kesehatan'          => ['kesehatan', 'ilmu kesehatan', 'keperawatan', 'farmasi', 'kedokteran', 'public health', 'biomedis'],
+            'teknik'             => ['teknik', 'engineering', 'teknik mesin', 'teknik sipil', 'teknik elektro', 'teknik kimia', 'teknik industri'],
+            'teknik sipil'       => ['teknik sipil', 'civil engineering', 'civil infrastructure'],
+            'teknik mesin'       => ['teknik mesin', 'mechanical engineering'],
+            'teknik elektro'     => ['teknik elektro', 'electrical engineering', 'teknik elektronika'],
+            'ekonomi'            => ['ekonomi', 'economics', 'ilmu ekonomi', 'ekonomi pembangunan'],
+            'manajemen'          => ['manajemen', 'management', 'administrasi bisnis', 'business administration'],
+            'bisnis'             => ['bisnis', 'business', 'administrasi bisnis', 'manajemen bisnis'],
+            'akuntansi'          => ['akuntansi', 'accounting', 'keuangan'],
+            'hukum'              => ['hukum', 'law', 'ilmu hukum', 'hukum dan studi hukum'],
+            'hubungan internasional' => ['hubungan internasional', 'international relations', 'studi global'],
+            'psikologi'          => ['psikologi', 'psychology'],
+            'komunikasi'         => ['komunikasi', 'studi komunikasi', 'ilmu komunikasi'],
+            'pendidikan'         => ['pendidikan', 'education', 'ilmu pendidikan'],
+            'pertanian'          => ['pertanian', 'studi pertanian', 'agrikultur', 'agriculture'],
+            'lingkungan'         => ['lingkungan', 'ilmu lingkungan', 'studi lingkungan', 'environmental'],
+            'matematika'         => ['matematika', 'mathematics', 'statistika'],
+            'fisika'             => ['fisika', 'physics', 'fisika & astronomi'],
+            'kimia'              => ['kimia', 'chemistry', 'teknik kimia'],
+            'biologi'            => ['biologi', 'ilmu biologi', 'biology', 'bioteknologi'],
+            'farmasi'            => ['farmasi', 'pharmacy', 'pharmaceutical'],
+            'sastra'             => ['sastra', 'bahasa dan sastra', 'literature', 'bahasa inggris'],
+            'seni'               => ['seni', 'seni rupa', 'seni kreatif', 'musik', 'desain'],
+        ];
+
+        // Expand major ke semua sinonimnya
+        $searchTerms = [$major];
+        foreach ($majorSynonyms as $key => $synonyms) {
+            if ($major === $key || in_array($major, $synonyms)) {
+                $searchTerms = array_unique(array_merge($searchTerms, $synonyms));
+                break;
+            }
+        }
+
+        // Helper: cek apakah beasiswa tersedia untuk jurusan (cek kolom jurusan, persyaratan, benefit)
+        $checkMajor = function($s) use ($searchTerms, $major) {
+            $s = (array)$s;
+            // Prioritaskan kolom jurusan jika ada
+            $jurusan = strtolower($s['jurusan'] ?? $s['bidang'] ?? '');
+            $persyaratan = strtolower($s['persyaratan'] ?? '');
+            $benefit = strtolower($s['benefit'] ?? '');
+            if ($jurusan === 'semua jurusan') return true;
+            foreach ($searchTerms as $term) {
+                if (str_contains($jurusan, $term) || str_contains($persyaratan, $term) || str_contains($benefit, $term)) {
+                    return true;
+                }
+            }
+            return false;
+        };
+
         // 1. JIKA ADA REFERENSI NOMOR SPESIFIK (Misal: "no 2 ada jurusan X?")
         if (preg_match('/\b(?:no|nomor|#|ke)\s*([0-9]+)\b/i', $ref, $refMatches)) {
             $num = (int)$refMatches[1];
             $results = session()->get('last_search_all_results', []);
             if (isset($results[$num - 1])) {
                 $s = (array)$results[$num - 1];
-                $bidang = strtolower($s['bidang'] ?? '');
-                $persyaratan = strtolower($s['persyaratan'] ?? '');
-                $benefit = strtolower($s['benefit'] ?? '');
                 $nama = $s['nama_beasiswa'];
-                
-                if (str_contains($bidang, $major) || str_contains($persyaratan, $major) || str_contains($benefit, $major)) {
+                if ($checkMajor($s)) {
                     return $this->finalizeResponse("Iya, beasiswa nomor $num (**$nama**) tersedia untuk jurusan **" . ucwords($major) . "**. 😊\n\nSilakan pilih nomor $num untuk melihat detail lengkapnya.", $normalizedData);
                 } else {
                     return $this->finalizeResponse("Mohon maaf, beasiswa nomor $num (**$nama**) sepertinya tidak tersedia untuk jurusan **" . ucwords($major) . "**. 😊", $normalizedData);
@@ -1994,30 +2126,20 @@ private function finalizeResponse($answer, $normalizedData = null, $success = tr
         // 2. JIKA ADA BEASISWA YANG SEDANG DIPILIH (Dan bukan nanya nomor lain)
         if (session()->has('selected_scholarship') && ($ref === 'ini' || $ref === 'itu' || $ref === 'tersebut' || $ref === '')) {
             $s = session()->get('selected_scholarship');
-            $bidang = strtolower($s['bidang'] ?? '');
-            $persyaratan = strtolower($s['persyaratan'] ?? '');
-            $benefit = strtolower($s['benefit'] ?? '');
             $nama = $s['nama_beasiswa'];
-            
-            // Cek di kolom bidang, persyaratan, atau benefit
-            if (str_contains($bidang, $major) || str_contains($persyaratan, $major) || str_contains($benefit, $major)) {
+            if ($checkMajor($s)) {
                 return $this->finalizeResponse("Iya, beasiswa **$nama** tersedia untuk jurusan **" . ucwords($major) . "**. 😊\n\nApa lagi yang ingin Anda ketahui? (Ketik: **Benefit**, **Syarat**, **Deadline**, atau **Cara Daftar**)", $normalizedData);
             } else {
                 return $this->finalizeResponse("Mohon maaf, sepertinya beasiswa **$nama** tidak secara spesifik menyebutkan ketersediaan untuk jurusan **" . ucwords($major) . "**. Namun Anda bisa mencoba mengecek detail syarat lengkapnya dengan mengetik **'Syarat'** atau mencari beasiswa lain. 😊", $normalizedData);
             }
         }
 
-        // 2. JIKA TIDAK ADA YANG DIPILIH, CEK LIST TERAKHIR (Validasi nomor)
+        // 3. JIKA TIDAK ADA YANG DIPILIH, CEK LIST TERAKHIR (Validasi nomor)
         $results = session()->get('last_search_results', []);
         $foundIn = [];
 
         foreach ($results as $i => $s) {
-            $s = (array)$s;
-            $bidang = strtolower($s['bidang'] ?? '');
-            $persyaratan = strtolower($s['persyaratan'] ?? '');
-            $benefit = strtolower($s['benefit'] ?? '');
-            
-            if (str_contains($bidang, $major) || str_contains($persyaratan, $major) || str_contains($benefit, $major)) {
+            if ($checkMajor($s)) {
                 $foundIn[] = ($i + 1);
             }
         }
